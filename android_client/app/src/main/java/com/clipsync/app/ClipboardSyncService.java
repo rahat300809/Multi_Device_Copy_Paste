@@ -102,20 +102,41 @@ public class ClipboardSyncService extends Service implements ClipboardManager.On
     public void onCreate() {
         super.onCreate();
         sInstance = this;
-        preferences = new AppPreferences(this);
-        clipboardManager = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
-        mainHandler = new Handler(Looper.getMainLooper());
+        try {
+            preferences = new AppPreferences(this);
+            clipboardManager = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+            mainHandler = new Handler(Looper.getMainLooper());
 
-        createNotificationChannel();
-        startForeground(NOTIF_ID, buildNotification("Starting ClipSync..."));
+            safeStartForeground("Starting ClipSync...");
 
-        if (clipboardManager != null) {
-            clipboardManager.addPrimaryClipChangedListener(this);
+            try {
+                if (clipboardManager != null) {
+                    clipboardManager.addPrimaryClipChangedListener(this);
+                }
+            } catch (Throwable t) {
+                Log.w(TAG, "Failed to register clip listener: " + t.getMessage());
+            }
+
+            try {
+                startBackgroundDiscovery();
+            } catch (Throwable t) {
+                Log.w(TAG, "Failed to start discovery: " + t.getMessage());
+            }
+
+            try {
+                registerNetworkMonitoring();
+            } catch (Throwable t) {
+                Log.w(TAG, "Failed to register network monitoring: " + t.getMessage());
+            }
+
+            try {
+                connectSync();
+            } catch (Throwable t) {
+                Log.w(TAG, "Failed to connect sync: " + t.getMessage());
+            }
+        } catch (Throwable t) {
+            Log.e(TAG, "Fatal in ClipboardSyncService.onCreate: " + t.getMessage(), t);
         }
-
-        startBackgroundDiscovery();
-        registerNetworkMonitoring();
-        connectSync();
     }
 
     @Override
@@ -131,17 +152,21 @@ public class ClipboardSyncService extends Service implements ClipboardManager.On
 
     @Override
     public void onPrimaryClipChanged() {
-        if (clipboardManager == null || !clipboardManager.hasPrimaryClip()) return;
-        ClipData clip = clipboardManager.getPrimaryClip();
-        if (clip != null && clip.getItemCount() > 0) {
-            CharSequence text = clip.getItemAt(0).getText();
-            if (text != null && text.length() > 0) {
-                String str = text.toString();
-                String hash = sha256(str);
-                if (!hash.equals(lastContentHash)) {
-                    sendToRemote(str);
+        try {
+            if (clipboardManager == null || !clipboardManager.hasPrimaryClip()) return;
+            ClipData clip = clipboardManager.getPrimaryClip();
+            if (clip != null && clip.getItemCount() > 0) {
+                CharSequence text = clip.getItemAt(0).getText();
+                if (text != null && text.length() > 0) {
+                    String str = text.toString();
+                    String hash = sha256(str);
+                    if (!hash.equals(lastContentHash)) {
+                        sendToRemote(str);
+                    }
                 }
             }
+        } catch (Throwable t) {
+            Log.w(TAG, "Error in onPrimaryClipChanged: " + t.getMessage());
         }
     }
 
@@ -415,12 +440,33 @@ public class ClipboardSyncService extends Service implements ClipboardManager.On
         }
     }
 
+    private void safeStartForeground(String text) {
+        try {
+            createNotificationChannel();
+            Notification notif = buildNotification(text);
+            if (Build.VERSION.SDK_INT >= 29) {
+                try {
+                    startForeground(NOTIF_ID, notif, 1); // 1 = FOREGROUND_SERVICE_TYPE_DATA_SYNC
+                    return;
+                } catch (Throwable t) {
+                    Log.w(TAG, "startForeground with type failed: " + t.getMessage());
+                }
+            }
+            startForeground(NOTIF_ID, notif);
+        } catch (Throwable t) {
+            Log.w(TAG, "safeStartForeground failed: " + t.getMessage());
+        }
+    }
+
     private Notification buildNotification(String text) {
-        Intent notificationIntent = new Intent(this, MainActivity.class);
-        PendingIntent pendingIntent = PendingIntent.getActivity(
-                this, 0, notificationIntent,
-                Build.VERSION.SDK_INT >= 23 ? PendingIntent.FLAG_IMMUTABLE : 0
-        );
+        PendingIntent pendingIntent = null;
+        try {
+            Intent notificationIntent = new Intent(this, MainActivity.class);
+            pendingIntent = PendingIntent.getActivity(
+                    this, 0, notificationIntent,
+                    Build.VERSION.SDK_INT >= 23 ? PendingIntent.FLAG_IMMUTABLE : 0
+            );
+        } catch (Throwable ignored) {}
 
         Notification.Builder builder;
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -429,19 +475,25 @@ public class ClipboardSyncService extends Service implements ClipboardManager.On
             builder = new Notification.Builder(this);
         }
 
-        return builder.setContentTitle("ClipSync Active")
+        builder.setContentTitle("ClipSync Active")
                 .setContentText(text)
-                .setSmallIcon(R.drawable.ic_clipboard)
-                .setContentIntent(pendingIntent)
-                .setOngoing(true)
-                .build();
+                .setSmallIcon(android.R.drawable.stat_notify_sync)
+                .setOngoing(true);
+
+        if (pendingIntent != null) {
+            builder.setContentIntent(pendingIntent);
+        }
+
+        return builder.build();
     }
 
     private void updateNotification(String text) {
-        NotificationManager manager = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
-        if (manager != null) {
-            manager.notify(NOTIF_ID, buildNotification(text));
-        }
+        try {
+            NotificationManager manager = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+            if (manager != null) {
+                manager.notify(NOTIF_ID, buildNotification(text));
+            }
+        } catch (Throwable ignored) {}
     }
 
     private String sha256(String base) {

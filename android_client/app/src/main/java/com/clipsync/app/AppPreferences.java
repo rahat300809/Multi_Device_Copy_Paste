@@ -41,7 +41,7 @@ public class AppPreferences {
     }
 
     public boolean isServiceActive() {
-        return prefs.getBoolean(KEY_SERVICE_ACTIVE, true);
+        return prefs.getBoolean(KEY_SERVICE_ACTIVE, false);
     }
 
     public void setServiceActive(boolean active) {

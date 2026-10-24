@@ -8,6 +8,7 @@ import android.content.IntentFilter;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.util.Log;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.PowerManager;
@@ -49,34 +50,51 @@ public class MainActivity extends Activity implements View.OnClickListener, andr
     private Handler mainHandler;
     private final Set<String> discoveredKeys = new HashSet<String>();
 
+    private static class SafeCrashHandler implements Thread.UncaughtExceptionHandler {
+        @Override
+        public void uncaughtException(Thread t, Throwable e) {
+            Log.e("ClipSyncCrash", "Uncaught exception in " + (t != null ? t.getName() : "unknown"), e);
+        }
+    }
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+
+        Thread.setDefaultUncaughtExceptionHandler(new SafeCrashHandler());
+
         setContentView(R.layout.activity_main);
 
         mainHandler = new Handler(Looper.getMainLooper());
         preferences = new AppPreferences(this);
         initViews();
-        loadSavedSettings();
 
-        // Android 13+ Notification permission
+        // Android 13+ Notification permission first
         if (Build.VERSION.SDK_INT >= 33) {
-            if (checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
-                requestPermissions(new String[]{android.Manifest.permission.POST_NOTIFICATIONS}, 1001);
-            }
+            try {
+                if (checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                    requestPermissions(new String[]{android.Manifest.permission.POST_NOTIFICATIONS}, 1001);
+                }
+            } catch (Throwable ignored) {}
         }
 
-        statusReceiver = new StatusReceiver(this);
-        IntentFilter filter = new IntentFilter();
-        filter.addAction(ClipboardSyncService.ACTION_STATUS_UPDATE);
-        filter.addAction(ClipboardSyncService.ACTION_DEVICE_DISCOVERED);
-        filter.addAction(ClipboardSyncService.ACTION_PAIR_REQUEST);
-        filter.addAction(ClipboardSyncService.ACTION_PAIR_RESPONSE);
+        loadSavedSettings();
 
-        if (Build.VERSION.SDK_INT >= 33) {
-            registerReceiver(statusReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
-        } else {
-            registerReceiver(statusReceiver, filter);
+        try {
+            statusReceiver = new StatusReceiver(this);
+            IntentFilter filter = new IntentFilter();
+            filter.addAction(ClipboardSyncService.ACTION_STATUS_UPDATE);
+            filter.addAction(ClipboardSyncService.ACTION_DEVICE_DISCOVERED);
+            filter.addAction(ClipboardSyncService.ACTION_PAIR_REQUEST);
+            filter.addAction(ClipboardSyncService.ACTION_PAIR_RESPONSE);
+
+            if (Build.VERSION.SDK_INT >= 33) {
+                registerReceiver(statusReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
+            } else {
+                registerReceiver(statusReceiver, filter);
+            }
+        } catch (Throwable t) {
+            Log.e("MainActivity", "Error registering receiver", t);
         }
     }
 
@@ -413,19 +431,31 @@ public class MainActivity extends Activity implements View.OnClickListener, andr
     }
 
     private void startSyncService() {
-        Intent intent = new Intent(this, ClipboardSyncService.class);
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            startForegroundService(intent);
-        } else {
-            startService(intent);
+        try {
+            Intent intent = new Intent(this, ClipboardSyncService.class);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                try {
+                    startForegroundService(intent);
+                } catch (Throwable t) {
+                    startService(intent);
+                }
+            } else {
+                startService(intent);
+            }
+            tvConnectionStatus.setText("Status: Service Running");
+        } catch (Throwable t) {
+            Log.e("MainActivity", "Failed to start sync service", t);
+            tvConnectionStatus.setText("Status: Stopped (Permission required)");
+            Toast.makeText(this, "Notification permission needed for background sync", Toast.LENGTH_SHORT).show();
         }
-        tvConnectionStatus.setText("Status: Service Running");
     }
 
     private void stopSyncService() {
-        Intent intent = new Intent(this, ClipboardSyncService.class);
-        stopService(intent);
-        tvConnectionStatus.setText("Status: Stopped");
+        try {
+            Intent intent = new Intent(this, ClipboardSyncService.class);
+            stopService(intent);
+            tvConnectionStatus.setText("Status: Stopped");
+        } catch (Throwable ignored) {}
     }
 
     private void requestBatteryOptimizationExemption() {
