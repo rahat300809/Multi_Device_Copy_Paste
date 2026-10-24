@@ -105,6 +105,16 @@ public class MainActivity extends Activity implements View.OnClickListener, andr
     protected void onResume() {
         super.onResume();
         loadCachedDiscoveredDevices();
+        autoSyncClipboardOnResume();
+    }
+
+    private void autoSyncClipboardOnResume() {
+        if (preferences != null && preferences.isServiceActive()) {
+            ClipboardSyncService service = ClipboardSyncService.getInstance();
+            if (service != null) {
+                service.syncCurrentClipboardNow();
+            }
+        }
     }
 
     private void loadCachedDiscoveredDevices() {

@@ -359,7 +359,34 @@ namespace ClipSync
         private ConcurrentDictionary<string, DiscoveredDevice> devices = new ConcurrentDictionary<string, DiscoveredDevice>();
         public event Action OnDevicesChanged;
         public Func<string, string, bool> OnUdpPairRequestReceived;
+        public Action<string, string> OnUdpClipboardReceived;
         private ConcurrentDictionary<string, TaskCompletionSource<bool>> pendingPairRequests = new ConcurrentDictionary<string, TaskCompletionSource<bool>>();
+
+        public void SendUdpClipboard(string text, string hash, string myName)
+        {
+            if (string.IsNullOrEmpty(text) || text.Length > 2500) return;
+            Task.Run(async () => {
+                try
+                {
+                    string b64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(text));
+                    string msg = "CLIPSYNC_CLIP:" + b64 + ":" + hash + ":" + myName;
+                    byte[] data = Encoding.UTF8.GetBytes(msg);
+
+                    foreach (var dev in GetDiscoveredDevices())
+                    {
+                        try
+                        {
+                            using (UdpClient udp = new UdpClient())
+                            {
+                                await udp.SendAsync(data, data.Length, new IPEndPoint(IPAddress.Parse(dev.IP), DISCOVERY_PORT));
+                            }
+                        }
+                        catch { }
+                    }
+                }
+                catch { }
+            });
+        }
 
         public IEnumerable<DiscoveredDevice> GetDiscoveredDevices()
         {
@@ -585,6 +612,25 @@ namespace ClipSync
                                     if (pendingPairRequests.TryGetValue(remoteIp, out tcs))
                                     {
                                         tcs.TrySetResult(isAllowed);
+                                    }
+                                }
+                            }
+                            else if (msg.StartsWith("CLIPSYNC_CLIP:"))
+                            {
+                                string[] parts = msg.Split(':');
+                                if (parts.Length >= 4)
+                                {
+                                    string b64 = parts[1];
+                                    string hash = parts[2];
+                                    string senderName = parts[3];
+                                    if (senderName != myName && OnUdpClipboardReceived != null)
+                                    {
+                                        try
+                                        {
+                                            string text = Encoding.UTF8.GetString(Convert.FromBase64String(b64));
+                                            OnUdpClipboardReceived(text, hash);
+                                        }
+                                        catch { }
                                     }
                                 }
                             }
@@ -865,6 +911,16 @@ namespace ClipSync
             configPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "config.json");
             LoadConfig();
 
+            // Auto-start on Windows boot by default so it always starts
+            try
+            {
+                if (!IsAutoStartEnabled())
+                {
+                    SetAutoStart(true);
+                }
+            }
+            catch { }
+
             // Auto-configure Windows Firewall in background if not already allowed
             Task.Run(() => EnsureFirewallConfigured(false));
 
@@ -904,6 +960,17 @@ namespace ClipSync
 
             discoveryService = new DiscoveryService();
             discoveryService.OnUdpPairRequestReceived = (fromName, fromIp) => OnIncomingPairRequest(fromName, fromIp);
+            discoveryService.OnUdpClipboardReceived = (text, hash) => {
+                if (hash == lastHash) return;
+                lastHash = hash;
+                SafeSetClipboardText(text);
+                try
+                {
+                    string preview = text.Length > 40 ? text.Substring(0, 40) + "..." : text;
+                    trayIcon.ShowBalloonTip(1000, "ClipSync", "📋 Synced: " + preview, ToolTipIcon.Info);
+                }
+                catch { }
+            };
             discoveryService.StartBroadcasting(deviceName, 8765);
             discoveryService.StartListening(deviceName);
 
@@ -1250,6 +1317,11 @@ namespace ClipSync
                 {
                     byte[] bytes = Encoding.UTF8.GetBytes(json);
                     await webSocket.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, cts.Token);
+                }
+
+                if (discoveryService != null)
+                {
+                    discoveryService.SendUdpClipboard(text, lastHash, deviceName);
                 }
             }
             catch { }

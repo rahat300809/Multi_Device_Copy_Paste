@@ -13,6 +13,7 @@ public class SyncWebSocketClient extends WebSocketClient {
     public SyncWebSocketClient(URI serverUri, ClipboardSyncService service) {
         super(serverUri);
         this.service = service;
+        setConnectionLostTimeout(10);
     }
 
     @Override

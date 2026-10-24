@@ -11,19 +11,28 @@ public class BootReceiver extends BroadcastReceiver {
 
     @Override
     public void onReceive(Context context, Intent intent) {
-        if (Intent.ACTION_BOOT_COMPLETED.equals(intent.getAction()) ||
-            "android.intent.action.QUICKBOOT_POWERON".equals(intent.getAction())) {
+        String action = intent != null ? intent.getAction() : "";
+        if (Intent.ACTION_BOOT_COMPLETED.equals(action) ||
+            "android.intent.action.QUICKBOOT_POWERON".equals(action) ||
+            Intent.ACTION_MY_PACKAGE_REPLACED.equals(action)) {
 
-            Log.i(TAG, "Device booted. Starting ClipboardSyncService in background...");
-            AppPreferences prefs = new AppPreferences(context);
-
-            if (prefs.isServiceActive()) {
-                Intent serviceIntent = new Intent(context, ClipboardSyncService.class);
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    context.startForegroundService(serviceIntent);
-                } else {
-                    context.startService(serviceIntent);
+            Log.i(TAG, "Device booted or app updated. Starting ClipboardSyncService in background...");
+            try {
+                AppPreferences prefs = new AppPreferences(context);
+                if (prefs.isServiceActive()) {
+                    Intent serviceIntent = new Intent(context, ClipboardSyncService.class);
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        try {
+                            context.startForegroundService(serviceIntent);
+                        } catch (Throwable t) {
+                            context.startService(serviceIntent);
+                        }
+                    } else {
+                        context.startService(serviceIntent);
+                    }
                 }
+            } catch (Throwable t) {
+                Log.e(TAG, "Failed to start service on boot", t);
             }
         }
     }

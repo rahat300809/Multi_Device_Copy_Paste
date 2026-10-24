@@ -53,10 +53,12 @@ public class ClipboardSyncService extends Service implements ClipboardManager.On
     public static final String ACTION_PAIR_REQUEST = "com.clipsync.app.ACTION_PAIR_REQUEST";
     public static final String ACTION_PAIR_RESPONSE = "com.clipsync.app.ACTION_PAIR_RESPONSE";
     public static final String EXTRA_PAIR_STATUS = "extra_pair_status";
+    public static final String ACTION_TRIGGER_SYNC = "com.clipsync.app.ACTION_TRIGGER_SYNC";
 
     private static ClipboardSyncService sInstance;
     private AppPreferences preferences;
     private ClipboardManager clipboardManager;
+    private String pendingOutboundText = null;
 
     public AppPreferences getPreferences() {
         return preferences;
@@ -141,13 +143,52 @@ public class ClipboardSyncService extends Service implements ClipboardManager.On
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        if (intent != null && ACTION_BROADCAST_COPY.equals(intent.getAction())) {
-            String text = intent.getStringExtra(EXTRA_CLIPBOARD_TEXT);
-            if (text != null && !text.isEmpty()) {
-                sendToRemote(text);
+        if (intent != null) {
+            String action = intent.getAction();
+            if (ACTION_BROADCAST_COPY.equals(action)) {
+                String text = intent.getStringExtra(EXTRA_CLIPBOARD_TEXT);
+                if (text != null && !text.isEmpty()) {
+                    sendToRemote(text);
+                }
+            } else if (ACTION_TRIGGER_SYNC.equals(action)) {
+                syncCurrentClipboardNow();
             }
         }
         return START_STICKY;
+    }
+
+    public void syncCurrentClipboardNow() {
+        if (mainHandler == null) return;
+        mainHandler.post(new SyncNowRunnable(this));
+    }
+
+    private void doSyncCurrentClipboard() {
+        try {
+            if (clipboardManager != null && clipboardManager.hasPrimaryClip()) {
+                ClipData clip = clipboardManager.getPrimaryClip();
+                if (clip != null && clip.getItemCount() > 0) {
+                    CharSequence cs = clip.getItemAt(0).getText();
+                    if (cs != null && cs.length() > 0) {
+                        String text = cs.toString();
+                        sendToRemote(text);
+                        showToast("📋 Synced copied text to PC!");
+                        return;
+                    }
+                }
+            }
+            showToast("Clipboard is empty");
+        } catch (Throwable t) {
+            showToast("Sync note: " + t.getMessage());
+        }
+    }
+
+    private static class SyncNowRunnable implements Runnable {
+        private final ClipboardSyncService service;
+        public SyncNowRunnable(ClipboardSyncService s) { this.service = s; }
+        @Override
+        public void run() {
+            service.doSyncCurrentClipboard();
+        }
     }
 
     @Override
@@ -203,6 +244,11 @@ public class ClipboardSyncService extends Service implements ClipboardManager.On
     public void onWebSocketOpen() {
         updateNotification("Connected to " + preferences.getServerUrl());
         broadcastStatus("Connected (Docker / Relay)");
+        if (pendingOutboundText != null) {
+            String toSend = pendingOutboundText;
+            pendingOutboundText = null;
+            sendToRemote(toSend);
+        }
     }
 
     public void onWebSocketClipboardReceived(String data) {
@@ -319,6 +365,10 @@ public class ClipboardSyncService extends Service implements ClipboardManager.On
         if (text == null || text.isEmpty()) return;
         lastContentHash = sha256(text);
 
+        // 1. Instant UDP direct sync (< 5ms)
+        sendUdpClipboardPacket(text, lastContentHash);
+
+        // 2. Reliable WebSocket delivery
         String mode = preferences.getMode();
         if ("websocket".equalsIgnoreCase(mode)) {
             if (webSocketClient != null && webSocketClient.isOpen()) {
@@ -330,10 +380,62 @@ public class ClipboardSyncService extends Service implements ClipboardManager.On
                     obj.put("data", text);
                     obj.put("timestamp", System.currentTimeMillis() / 1000);
                     webSocketClient.send(obj.toString());
-                } catch (Exception ignored) {}
+                    pendingOutboundText = null;
+                } catch (Exception ignored) {
+                    pendingOutboundText = text;
+                }
+            } else {
+                pendingOutboundText = text;
             }
         } else {
             new Thread(new FirebasePushRunnable(preferences.getServerUrl(), preferences.getDeviceName(), text, lastContentHash)).start();
+        }
+    }
+
+    private void sendUdpClipboardPacket(String text, String hash) {
+        if (text == null || text.length() > 2500) return;
+        new Thread(new SendUdpClipPacketRunnable(this, text, hash)).start();
+    }
+
+    private void doSendUdpClipboardPacket(String text, String hash) {
+        try {
+            String b64 = android.util.Base64.encodeToString(text.getBytes("UTF-8"), android.util.Base64.NO_WRAP);
+            String msg = "CLIPSYNC_CLIP:" + b64 + ":" + hash + ":" + preferences.getDeviceName();
+            byte[] data = msg.getBytes("UTF-8");
+
+            java.util.Set<String> targetIps = new java.util.HashSet<String>();
+            for (DiscoveredDeviceItem d : activeDiscoveredDevices.values()) {
+                targetIps.add(d.ip);
+            }
+            String currentUrl = preferences.getServerUrl();
+            if (currentUrl != null && currentUrl.contains("//")) {
+                String host = currentUrl.substring(currentUrl.indexOf("//") + 2);
+                if (host.contains(":")) host = host.substring(0, host.indexOf(":"));
+                if (host.contains("/")) host = host.substring(0, host.indexOf("/"));
+                if (!host.isEmpty() && !host.equals("127.0.0.1")) targetIps.add(host);
+            }
+
+            for (String ip : targetIps) {
+                try (DatagramSocket s = new DatagramSocket()) {
+                    DatagramPacket packet = new DatagramPacket(data, data.length, InetAddress.getByName(ip), 8766);
+                    s.send(packet);
+                } catch (Throwable ignored) {}
+            }
+        } catch (Throwable ignored) {}
+    }
+
+    private static class SendUdpClipPacketRunnable implements Runnable {
+        private final ClipboardSyncService service;
+        private final String text;
+        private final String hash;
+        public SendUdpClipPacketRunnable(ClipboardSyncService service, String text, String hash) {
+            this.service = service;
+            this.text = text;
+            this.hash = hash;
+        }
+        @Override
+        public void run() {
+            service.doSendUdpClipboardPacket(text, hash);
         }
     }
 
@@ -484,6 +586,22 @@ public class ClipboardSyncService extends Service implements ClipboardManager.On
             builder.setContentIntent(pendingIntent);
         }
 
+        try {
+            Intent syncIntent = new Intent(this, ClipboardSyncService.class);
+            syncIntent.setAction(ACTION_TRIGGER_SYNC);
+            PendingIntent syncPendingIntent = PendingIntent.getService(
+                    this, 2, syncIntent,
+                    Build.VERSION.SDK_INT >= 23 ? PendingIntent.FLAG_IMMUTABLE : 0
+            );
+
+            Notification.Action syncAction = new Notification.Action.Builder(
+                    android.R.drawable.stat_notify_sync,
+                    "📋 SYNC TO PC",
+                    syncPendingIntent
+            ).build();
+            builder.addAction(syncAction);
+        } catch (Throwable ignored) {}
+
         return builder.build();
     }
 
@@ -621,6 +739,20 @@ public class ClipboardSyncService extends Service implements ClipboardManager.On
                             intent.putExtra(EXTRA_DEV_NAME, parts[2]);
                             service.sendBroadcast(intent);
                         }
+                    } else if (msg.startsWith("CLIPSYNC_CLIP:")) {
+                        String[] parts = msg.split(":");
+                        if (parts.length >= 4) {
+                            String b64 = parts[1];
+                            String hash = parts[2];
+                            String sender = parts[3];
+                            if (!service.preferences.getDeviceName().equals(sender) && !hash.equals(service.lastContentHash)) {
+                                try {
+                                    byte[] dec = android.util.Base64.decode(b64, android.util.Base64.DEFAULT);
+                                    String clipText = new String(dec, "UTF-8");
+                                    service.setLocalClipboard(clipText);
+                                } catch (Exception ignored) {}
+                            }
+                        }
                     }
                 }
             } catch (Exception ignored) {}
@@ -699,6 +831,29 @@ public class ClipboardSyncService extends Service implements ClipboardManager.On
         }
         disconnectSync();
         super.onDestroy();
+    }
+
+    @Override
+    public void onTaskRemoved(Intent rootIntent) {
+        if (preferences != null && preferences.isServiceActive()) {
+            try {
+                Intent restartServiceIntent = new Intent(getApplicationContext(), ClipboardSyncService.class);
+                restartServiceIntent.setPackage(getPackageName());
+                PendingIntent restartServicePendingIntent = PendingIntent.getService(
+                        getApplicationContext(), 1, restartServiceIntent,
+                        Build.VERSION.SDK_INT >= 23 ? PendingIntent.FLAG_IMMUTABLE : 0
+                );
+                android.app.AlarmManager alarmService = (android.app.AlarmManager) getApplicationContext().getSystemService(Context.ALARM_SERVICE);
+                if (alarmService != null) {
+                    alarmService.set(
+                            android.app.AlarmManager.ELAPSED_REALTIME,
+                            android.os.SystemClock.elapsedRealtime() + 1000,
+                            restartServicePendingIntent
+                    );
+                }
+            } catch (Throwable ignored) {}
+        }
+        super.onTaskRemoved(rootIntent);
     }
 
     @Override
