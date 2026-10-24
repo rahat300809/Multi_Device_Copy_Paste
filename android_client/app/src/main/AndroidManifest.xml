@@ -5,8 +5,8 @@
     android:versionName="1.0.0">
 
     <uses-sdk
-        android:minSdkVersion="26"
-        android:targetSdkVersion="34" />
+        android:minSdkVersion="21"
+        android:targetSdkVersion="33" />
 
     <!-- Network permissions -->
     <uses-permission android:name="android.permission.INTERNET" />
