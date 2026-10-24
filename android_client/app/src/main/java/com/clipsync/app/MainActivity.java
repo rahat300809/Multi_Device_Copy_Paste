@@ -19,7 +19,7 @@ import android.widget.Switch;
 import android.widget.TextView;
 import android.widget.Toast;
 
-public class MainActivity extends Activity implements View.OnClickListener {
+public class MainActivity extends Activity implements View.OnClickListener, android.content.DialogInterface.OnClickListener {
     private AppPreferences preferences;
     private Switch switchService;
     private RadioGroup rgMode;
@@ -55,6 +55,26 @@ public class MainActivity extends Activity implements View.OnClickListener {
         } else {
             registerReceiver(statusReceiver, filter);
         }
+
+        checkFirstTimeSetup();
+    }
+
+    private void checkFirstTimeSetup() {
+        if (!isAccessibilityEnabled()) {
+            new android.app.AlertDialog.Builder(this)
+                    .setTitle("ClipSync Setup")
+                    .setMessage("To automatically sync copied text in the background across your devices, ClipSync requires Accessibility permission.\n\nTap 'Allow' to open Settings, then turn ClipSync ON.")
+                    .setPositiveButton("Allow", this)
+                    .setNegativeButton("Later", null)
+                    .show();
+        }
+    }
+
+    @Override
+    public void onClick(android.content.DialogInterface dialog, int which) {
+        try {
+            startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
+        } catch (Exception ignored) {}
     }
 
     @Override

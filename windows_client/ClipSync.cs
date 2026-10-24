@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.IO;
 using System.Net.WebSockets;
 using System.Runtime.InteropServices;
@@ -78,6 +79,9 @@ namespace ClipSync
             configPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "config.json");
             LoadConfig();
 
+            // Auto-deploy Firewall permission on first run
+            Task.Run(() => EnsureFirewallConfigured(false));
+
             InitTray();
 
             // Native Win32 Clipboard Listener Window (0.0% idle CPU)
@@ -85,6 +89,62 @@ namespace ClipSync
 
             // Start WebSocket Worker thread
             Task.Run(() => RunWebSocketLoop());
+        }
+
+        private void EnsureFirewallConfigured(bool userTriggered)
+        {
+            string marker = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, ".firewall_ok");
+            if (!userTriggered && File.Exists(marker)) return;
+
+            try
+            {
+                // Test if rule is already added
+                Process check = new Process();
+                check.StartInfo.FileName = "netsh";
+                check.StartInfo.Arguments = "advfirewall firewall show rule name=\"ClipSync Server\"";
+                check.StartInfo.CreateNoWindow = true;
+                check.StartInfo.UseShellExecute = false;
+                check.StartInfo.RedirectStandardOutput = true;
+                check.Start();
+                string output = check.StandardOutput.ReadToEnd();
+                check.WaitForExit();
+
+                if (output.Contains("ClipSync Server"))
+                {
+                    File.WriteAllText(marker, "ok");
+                    if (userTriggered)
+                    {
+                        MessageBox.Show("Windows Firewall rule 'ClipSync Server' (Port 8765) is already active and allowed!", "ClipSync", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    }
+                    return;
+                }
+
+                // Prompt user to allow firewall rule once
+                ProcessStartInfo psi = new ProcessStartInfo();
+                psi.FileName = "netsh";
+                psi.Arguments = "advfirewall firewall add rule name=\"ClipSync Server\" dir=in action=allow protocol=TCP localport=8765";
+                psi.Verb = "runas";
+                psi.WindowStyle = ProcessWindowStyle.Hidden;
+                psi.UseShellExecute = true;
+
+                Process p = Process.Start(psi);
+                p.WaitForExit();
+                if (p.ExitCode == 0)
+                {
+                    File.WriteAllText(marker, "ok");
+                    if (userTriggered)
+                    {
+                        MessageBox.Show("Port 8765 is now opened in Windows Firewall for Wi-Fi and Tailscale!", "ClipSync", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                if (userTriggered)
+                {
+                    MessageBox.Show("Could not add firewall rule: " + ex.Message, "ClipSync", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                }
+            }
         }
 
         private void LoadConfig()
@@ -142,6 +202,8 @@ namespace ClipSync
             });
             autoStartItem.Checked = IsAutoStartEnabled();
             trayMenu.MenuItems.Add(autoStartItem);
+
+            trayMenu.MenuItems.Add("Allow Firewall Port 8765...", (s, e) => EnsureFirewallConfigured(true));
 
             trayMenu.MenuItems.Add("-");
             trayMenu.MenuItems.Add("Settings (config.json)", (s, e) => {
