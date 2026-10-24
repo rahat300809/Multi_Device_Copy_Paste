@@ -16,12 +16,19 @@ import android.os.Looper;
 import android.util.Log;
 import android.widget.Toast;
 
+import android.net.ConnectivityManager;
+import android.net.Network;
+
 import org.json.JSONObject;
 
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
+import java.net.DatagramPacket;
+import java.net.DatagramSocket;
 import java.net.HttpURLConnection;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.URL;
 import java.security.MessageDigest;
@@ -36,6 +43,16 @@ public class ClipboardSyncService extends Service implements ClipboardManager.On
     public static final String ACTION_STATUS_UPDATE = "com.clipsync.app.ACTION_STATUS_UPDATE";
     public static final String EXTRA_STATUS = "extra_status";
 
+    public static final String ACTION_DEVICE_DISCOVERED = "com.clipsync.app.ACTION_DEVICE_DISCOVERED";
+    public static final String EXTRA_DEV_NAME = "extra_dev_name";
+    public static final String EXTRA_DEV_TYPE = "extra_dev_type";
+    public static final String EXTRA_DEV_IP = "extra_dev_ip";
+    public static final String EXTRA_DEV_PORT = "extra_dev_port";
+
+    public static final String ACTION_PAIR_REQUEST = "com.clipsync.app.ACTION_PAIR_REQUEST";
+    public static final String ACTION_PAIR_RESPONSE = "com.clipsync.app.ACTION_PAIR_RESPONSE";
+    public static final String EXTRA_PAIR_STATUS = "extra_pair_status";
+
     private static ClipboardSyncService sInstance;
     private AppPreferences preferences;
     private ClipboardManager clipboardManager;
@@ -49,6 +66,10 @@ public class ClipboardSyncService extends Service implements ClipboardManager.On
 
     private String lastContentHash = "";
     private boolean isDestroyed = false;
+
+    private DatagramSocket udpSocket;
+    private boolean isDiscoveryRunning = false;
+    private ConnectivityManager.NetworkCallback networkCallback;
 
     public static synchronized ClipboardSyncService getInstance() {
         return sInstance;
@@ -69,6 +90,8 @@ public class ClipboardSyncService extends Service implements ClipboardManager.On
             clipboardManager.addPrimaryClipChangedListener(this);
         }
 
+        startBackgroundDiscovery();
+        registerNetworkMonitoring();
         connectSync();
     }
 
@@ -417,9 +440,148 @@ public class ClipboardSyncService extends Service implements ClipboardManager.On
         }
     }
 
+    private void registerNetworkMonitoring() {
+        try {
+            ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+            if (cm != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                networkCallback = new ServiceNetworkCallback(this);
+                cm.registerDefaultNetworkCallback(networkCallback);
+            }
+        } catch (Exception ignored) {}
+    }
+
+    private static class ServiceNetworkCallback extends ConnectivityManager.NetworkCallback {
+        private final ClipboardSyncService service;
+        public ServiceNetworkCallback(ClipboardSyncService s) { this.service = s; }
+        @Override
+        public void onAvailable(Network network) {
+            service.sendDiscoveryBroadcast();
+            service.mainHandler.postDelayed(new ReconnectRunnable(service), 1000);
+        }
+    }
+
+    private void startBackgroundDiscovery() {
+        isDiscoveryRunning = true;
+        new Thread(new ServiceDiscoveryRunnable(this)).start();
+        new Thread(new ServiceBroadcastLoopRunnable(this)).start();
+    }
+
+    public void sendDiscoveryBroadcast() {
+        new Thread(new ServiceBroadcastRunnable(preferences.getDeviceName())).start();
+    }
+
+    private static class ServiceDiscoveryRunnable implements Runnable {
+        private final ClipboardSyncService service;
+        public ServiceDiscoveryRunnable(ClipboardSyncService s) { this.service = s; }
+        @Override
+        public void run() {
+            try {
+                service.udpSocket = new DatagramSocket(null);
+                service.udpSocket.setReuseAddress(true);
+                service.udpSocket.setBroadcast(true);
+                service.udpSocket.bind(new InetSocketAddress(8766));
+
+                byte[] buf = new byte[2048];
+                while (!service.isDestroyed && service.isDiscoveryRunning) {
+                    DatagramPacket packet = new DatagramPacket(buf, buf.length);
+                    service.udpSocket.receive(packet);
+                    String msg = new String(packet.getData(), 0, packet.getLength(), "UTF-8");
+                    String remoteIp = packet.getAddress().getHostAddress();
+
+                    if (msg.startsWith("CLIPSYNC_DEV:")) {
+                        String[] parts = msg.split(":");
+                        if (parts.length >= 4) {
+                            String name = parts[1];
+                            String type = parts[2];
+                            String port = parts[3];
+
+                            if (service.preferences.getDeviceName().equals(name)) continue;
+
+                            Intent intent = new Intent(ACTION_DEVICE_DISCOVERED);
+                            intent.putExtra(EXTRA_DEV_NAME, name);
+                            intent.putExtra(EXTRA_DEV_TYPE, type);
+                            intent.putExtra(EXTRA_DEV_IP, remoteIp);
+                            intent.putExtra(EXTRA_DEV_PORT, port);
+                            service.sendBroadcast(intent);
+
+                            // AUTO SYNC / AUTO RECONNECT ON NETWORK CHANGE
+                            String pairedName = service.preferences.getPairedDeviceName();
+                            if (!pairedName.isEmpty() && pairedName.equalsIgnoreCase(name)) {
+                                String newWs = "ws://" + remoteIp + ":" + port + "/ws";
+                                String currentWs = service.preferences.getServerUrl();
+                                boolean isConnected = service.webSocketClient != null && service.webSocketClient.isOpen();
+
+                                if (!isConnected || !newWs.equalsIgnoreCase(currentWs)) {
+                                    service.preferences.setServerUrl(newWs);
+                                    service.mainHandler.post(new ReconnectRunnable(service));
+                                }
+                            }
+                        }
+                    } else if (msg.startsWith("CLIPSYNC_PAIR_REQ:")) {
+                        String[] parts = msg.split(":");
+                        if (parts.length >= 4) {
+                            Intent intent = new Intent(ACTION_PAIR_REQUEST);
+                            intent.putExtra(EXTRA_DEV_NAME, parts[1]);
+                            intent.putExtra(EXTRA_DEV_IP, parts[2]);
+                            intent.putExtra(EXTRA_DEV_PORT, parts[3]);
+                            service.sendBroadcast(intent);
+                        }
+                    } else if (msg.startsWith("CLIPSYNC_PAIR_RESP:")) {
+                        String[] parts = msg.split(":");
+                        if (parts.length >= 3) {
+                            Intent intent = new Intent(ACTION_PAIR_RESPONSE);
+                            intent.putExtra(EXTRA_PAIR_STATUS, parts[1]);
+                            intent.putExtra(EXTRA_DEV_NAME, parts[2]);
+                            service.sendBroadcast(intent);
+                        }
+                    }
+                }
+            } catch (Exception ignored) {}
+        }
+    }
+
+    private static class ServiceBroadcastLoopRunnable implements Runnable {
+        private final ClipboardSyncService service;
+        public ServiceBroadcastLoopRunnable(ClipboardSyncService s) { this.service = s; }
+        @Override
+        public void run() {
+            while (!service.isDestroyed && service.isDiscoveryRunning) {
+                service.sendDiscoveryBroadcast();
+                try { Thread.sleep(4000); } catch (InterruptedException ignored) {}
+            }
+        }
+    }
+
+    private static class ServiceBroadcastRunnable implements Runnable {
+        private final String devName;
+        public ServiceBroadcastRunnable(String name) { this.devName = name; }
+        @Override
+        public void run() {
+            try (DatagramSocket s = new DatagramSocket()) {
+                s.setBroadcast(true);
+                String msg = "CLIPSYNC_DEV:" + devName + ":android:8765";
+                byte[] data = msg.getBytes("UTF-8");
+                DatagramPacket packet = new DatagramPacket(data, data.length, InetAddress.getByName("255.255.255.255"), 8766);
+                s.send(packet);
+            } catch (Exception ignored) {}
+        }
+    }
+
     @Override
     public void onDestroy() {
         isDestroyed = true;
+        isDiscoveryRunning = false;
+        if (udpSocket != null) {
+            try { udpSocket.close(); } catch (Exception ignored) {}
+        }
+        if (networkCallback != null) {
+            try {
+                ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+                if (cm != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                    cm.unregisterNetworkCallback(networkCallback);
+                }
+            } catch (Exception ignored) {}
+        }
         disconnectSync();
         super.onDestroy();
     }

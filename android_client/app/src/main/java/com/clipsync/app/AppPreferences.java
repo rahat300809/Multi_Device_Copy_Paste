@@ -47,4 +47,12 @@ public class AppPreferences {
     public void setServiceActive(boolean active) {
         prefs.edit().putBoolean(KEY_SERVICE_ACTIVE, active).apply();
     }
+
+    public String getPairedDeviceName() {
+        return prefs.getString("paired_device_name", "");
+    }
+
+    public void setPairedDeviceName(String name) {
+        prefs.edit().putString("paired_device_name", name).apply();
+    }
 }

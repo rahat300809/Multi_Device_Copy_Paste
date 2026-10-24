@@ -99,17 +99,18 @@ subprocess.run([
     "-p", "-f", "4", fresh_apk, aligned_apk
 ], check=True)
 
-# Generate keystore if needed
-keystore = os.path.join(BUILD_DIR, "release.keystore")
+# Generate persistent keystore if needed
+keystore = os.path.join(ANDROID_DIR, "release.keystore")
 if not os.path.exists(keystore):
     subprocess.run([
-        KEYTOOL, "-genkey", "-v",
+        KEYTOOL, "-genkeypair", "-v",
         "-keystore", keystore,
+        "-storetype", "PKCS12",
         "-storepass", "clipsync123",
         "-alias", "clipsync",
         "-keypass", "clipsync123",
         "-keyalg", "RSA", "-keysize", "2048", "-validity", "10000",
-        "-dname", "CN=ClipSync, OU=Apps, O=ClipSync, C=US"
+        "-dname", "CN=ClipSync Open Source, OU=Production, O=ClipSync Project, L=San Francisco, ST=California, C=US"
     ], check=True)
 
 output_apk = os.path.join(WORKSPACE, "ClipSync.apk")

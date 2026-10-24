@@ -770,15 +770,27 @@ namespace ClipSync
             Task.Run(() => RunWebSocketLoop());
         }
 
+        private HashSet<string> allowedDevices = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
         private bool OnIncomingPairRequest(string fromName, string fromIp)
         {
+            if (allowedDevices.Contains(fromName))
+            {
+                return true;
+            }
+
             DialogResult res = MessageBox.Show(
                 "📱 Device: " + fromName + " (" + fromIp + ")\n\nwants to connect and sync clipboard with this computer.\n\nDo you want to ALLOW this device?",
                 "ClipSync — Incoming Connection Request",
                 MessageBoxButtons.YesNo,
                 MessageBoxIcon.Question
             );
-            return res == DialogResult.Yes;
+            if (res == DialogResult.Yes)
+            {
+                allowedDevices.Add(fromName);
+                return true;
+            }
+            return false;
         }
 
         public async Task<bool> RequestPairingAndConnect(DiscoveredDevice dev)

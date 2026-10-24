@@ -38,3 +38,6 @@ test_*.py
 test_*.ps1
 kill_clipsync.ps1
 scratch/
+update_release.py
+*.keystore
+*.p12

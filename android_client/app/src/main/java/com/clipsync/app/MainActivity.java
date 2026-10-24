@@ -45,8 +45,6 @@ public class MainActivity extends Activity implements View.OnClickListener, andr
 
     private BroadcastReceiver statusReceiver;
     private Handler mainHandler;
-    private DatagramSocket udpSocket;
-    private boolean isDiscoveryRunning = false;
     private final Set<String> discoveredKeys = new HashSet<String>();
 
     @Override
@@ -67,7 +65,12 @@ public class MainActivity extends Activity implements View.OnClickListener, andr
         }
 
         statusReceiver = new StatusReceiver(this);
-        IntentFilter filter = new IntentFilter(ClipboardSyncService.ACTION_STATUS_UPDATE);
+        IntentFilter filter = new IntentFilter();
+        filter.addAction(ClipboardSyncService.ACTION_STATUS_UPDATE);
+        filter.addAction(ClipboardSyncService.ACTION_DEVICE_DISCOVERED);
+        filter.addAction(ClipboardSyncService.ACTION_PAIR_REQUEST);
+        filter.addAction(ClipboardSyncService.ACTION_PAIR_RESPONSE);
+
         if (Build.VERSION.SDK_INT >= 33) {
             registerReceiver(statusReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
         } else {
@@ -75,7 +78,6 @@ public class MainActivity extends Activity implements View.OnClickListener, andr
         }
 
         checkFirstTimeSetup();
-        startDiscoveryThread();
     }
 
     private void checkFirstTimeSetup() {
@@ -183,7 +185,8 @@ public class MainActivity extends Activity implements View.OnClickListener, andr
             discoveredKeys.clear();
             if (containerDevices != null) containerDevices.removeAllViews();
             if (tvScanStatus != null) tvScanStatus.setText("Scanning Wi-Fi for laptops and other devices...");
-            sendDiscoveryPacket();
+            ClipboardSyncService service = ClipboardSyncService.getInstance();
+            if (service != null) service.sendDiscoveryBroadcast();
         } else if (id == R.id.btnTestPush) {
             ClipboardSyncService service = ClipboardSyncService.getInstance();
             if (service != null) {
@@ -197,94 +200,16 @@ public class MainActivity extends Activity implements View.OnClickListener, andr
         }
     }
 
-    private void sendDiscoveryPacket() {
-        new Thread(new SendDiscoveryRunnable(preferences.getDeviceName())).start();
+    public void onDeviceDiscovered(String name, String type, String ip, String port) {
+        mainHandler.post(new AddDeviceViewRunnable(this, name, type, ip, port));
     }
 
-    private static class SendDiscoveryRunnable implements Runnable {
-        private final String devName;
-        public SendDiscoveryRunnable(String name) { this.devName = name; }
-        @Override
-        public void run() {
-            try (DatagramSocket s = new DatagramSocket()) {
-                s.setBroadcast(true);
-                String msg = "CLIPSYNC_DEV:" + devName + ":android:8765";
-                byte[] data = msg.getBytes("UTF-8");
-                DatagramPacket packet = new DatagramPacket(data, data.length, InetAddress.getByName("255.255.255.255"), 8766);
-                s.send(packet);
-            } catch (Exception ignored) {}
-        }
+    public void onPairRequestReceived(String name, String ip, String port) {
+        mainHandler.post(new ShowPairReqDialogRunnable(this, name, ip, port));
     }
 
-    private void startDiscoveryThread() {
-        isDiscoveryRunning = true;
-        new Thread(new DiscoveryRunnable(this)).start();
-        new Thread(new BroadcastLoopRunnable(this)).start();
-    }
-
-    private static class BroadcastLoopRunnable implements Runnable {
-        private final MainActivity act;
-        public BroadcastLoopRunnable(MainActivity act) { this.act = act; }
-        @Override
-        public void run() {
-            while (act.isDiscoveryRunning && !act.isFinishing()) {
-                try (DatagramSocket s = new DatagramSocket()) {
-                    s.setBroadcast(true);
-                    String msg = "CLIPSYNC_DEV:" + act.preferences.getDeviceName() + ":android:8765";
-                    byte[] data = msg.getBytes("UTF-8");
-                    DatagramPacket packet = new DatagramPacket(data, data.length, InetAddress.getByName("255.255.255.255"), 8766);
-                    s.send(packet);
-                } catch (Exception ignored) {}
-                try { Thread.sleep(3000); } catch (InterruptedException ignored) {}
-            }
-        }
-    }
-
-    private static class DiscoveryRunnable implements Runnable {
-        private final MainActivity activity;
-        public DiscoveryRunnable(MainActivity act) { this.activity = act; }
-        @Override
-        public void run() {
-            try {
-                activity.udpSocket = new DatagramSocket(8766);
-                activity.udpSocket.setBroadcast(true);
-                byte[] buf = new byte[1024];
-                while (activity.isDiscoveryRunning && !activity.isFinishing()) {
-                    DatagramPacket packet = new DatagramPacket(buf, buf.length);
-                    activity.udpSocket.receive(packet);
-                    String msg = new String(packet.getData(), 0, packet.getLength(), "UTF-8");
-                    if (msg.startsWith("CLIPSYNC_DEV:")) {
-                        String[] parts = msg.split(":");
-                        if (parts.length >= 4) {
-                            final String name = parts[1];
-                            final String type = parts[2];
-                            final String port = parts[3];
-                            final String ip = packet.getAddress().getHostAddress();
-
-                            // Don't show ourselves
-                            if (activity.preferences.getDeviceName().equals(name)) continue;
-
-                            activity.mainHandler.post(new AddDeviceViewRunnable(activity, name, type, ip, port));
-                        }
-                    } else if (msg.startsWith("CLIPSYNC_PAIR_REQ:")) {
-                        String[] parts = msg.split(":");
-                        if (parts.length >= 4) {
-                            final String fromName = parts[1];
-                            final String fromIp = parts[2];
-                            final String fromPort = parts[3];
-                            activity.mainHandler.post(new ShowPairReqDialogRunnable(activity, fromName, fromIp, fromPort));
-                        }
-                    } else if (msg.startsWith("CLIPSYNC_PAIR_RESP:")) {
-                        String[] parts = msg.split(":");
-                        if (parts.length >= 3) {
-                            final String status = parts[1];
-                            final String fromName = parts[2];
-                            activity.mainHandler.post(new ShowPairRespToastRunnable(activity, status, fromName));
-                        }
-                    }
-                }
-            } catch (Exception ignored) {}
-        }
+    public void onPairResponseReceived(String status, String name) {
+        mainHandler.post(new ShowPairRespToastRunnable(this, status, name));
     }
 
     public void sendUdpResponse(String targetIp, String status) {
@@ -464,6 +389,7 @@ public class MainActivity extends Activity implements View.OnClickListener, andr
         @Override
         public void onClick(View v) {
             String targetWs = "ws://" + ip + ":" + port + "/ws";
+            act.preferences.setPairedDeviceName(name);
             act.etServerUrl.setText(targetWs);
             act.saveCurrentSettings();
             act.startSyncService();
@@ -545,10 +471,6 @@ public class MainActivity extends Activity implements View.OnClickListener, andr
 
     @Override
     protected void onDestroy() {
-        isDiscoveryRunning = false;
-        if (udpSocket != null) {
-            try { udpSocket.close(); } catch (Exception ignored) {}
-        }
         if (statusReceiver != null) {
             try {
                 unregisterReceiver(statusReceiver);
