@@ -17,7 +17,7 @@ print("=" * 60)
 
 # 1. Clean build directory
 if os.path.exists(BUILD_DIR):
-    shutil.rmtree(BUILD_DIR)
+    shutil.rmtree(BUILD_DIR, ignore_errors=True)
 os.makedirs(os.path.join(BUILD_DIR, "gen"), exist_ok=True)
 os.makedirs(os.path.join(BUILD_DIR, "bin"), exist_ok=True)
 

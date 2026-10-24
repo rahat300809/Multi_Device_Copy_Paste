@@ -20,6 +20,13 @@ public class SyncWebSocketClient extends WebSocketClient {
         Log.i(TAG, "WebSocket connected");
         if (service != null) {
             service.onWebSocketOpen();
+            try {
+                JSONObject req = new JSONObject();
+                req.put("type", "pair_req");
+                req.put("from_name", service.getPreferences().getDeviceName());
+                req.put("from_ip", "android");
+                send(req.toString());
+            } catch (Exception ignored) {}
         }
     }
 
@@ -28,7 +35,12 @@ public class SyncWebSocketClient extends WebSocketClient {
         if (service != null) {
             try {
                 JSONObject json = new JSONObject(message);
-                if ("clipboard".equals(json.optString("type"))) {
+                String type = json.optString("type");
+                if ("pair_resp".equals(type)) {
+                    String status = json.optString("status");
+                    boolean accepted = "accepted".equalsIgnoreCase(status) || "allow".equalsIgnoreCase(status);
+                    service.onPairResponse(accepted);
+                } else if ("clipboard".equals(type)) {
                     String data = json.optString("data");
                     if (data != null && !data.isEmpty()) {
                         service.onWebSocketClipboardReceived(data);

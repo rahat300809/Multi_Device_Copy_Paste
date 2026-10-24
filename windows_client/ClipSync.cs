@@ -2,6 +2,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Drawing;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
@@ -17,6 +18,27 @@ using Microsoft.Win32;
 
 namespace ClipSync
 {
+    // =========================================================================
+    // Discovered Device Model
+    // =========================================================================
+    public class DiscoveredDevice
+    {
+        public string Name { get; set; }
+        public string DeviceType { get; set; } // "windows" or "android"
+        public string IP { get; set; }
+        public int Port { get; set; }
+        public DateTime LastSeen { get; set; }
+
+        public string DisplayText
+        {
+            get
+            {
+                string icon = DeviceType == "android" ? "📱 " : "💻 ";
+                return icon + Name + " (" + IP + ":" + Port + ")";
+            }
+        }
+    }
+
     // =========================================================================
     // Native Win32 Clipboard Listener (0.0% CPU usage)
     // =========================================================================
@@ -59,16 +81,17 @@ namespace ClipSync
     }
 
     // =========================================================================
-    // Standalone Embedded WebSocket Relay Server (Zero Dependencies, Zero Python)
+    // Standalone Embedded WebSocket Relay Server (Zero Dependencies)
     // =========================================================================
     public class EmbeddedRelayServer
     {
         private TcpListener listener;
         private CancellationTokenSource cts = new CancellationTokenSource();
         private ConcurrentDictionary<string, TcpClient> clients = new ConcurrentDictionary<string, TcpClient>();
-        private string lastHash = "";
         public bool IsRunning { get; private set; }
         public int Port { get; private set; }
+        public Func<string, string, bool> OnPairRequestReceived;
+        public Action<string> OnClipboardMessageReceived;
 
         public EmbeddedRelayServer(int port = 8765)
         {
@@ -127,6 +150,7 @@ namespace ClipSync
             NetworkStream stream = client.GetStream();
             byte[] buffer = new byte[8192];
             int read = await stream.ReadAsync(buffer, 0, buffer.Length, token);
+            if (read <= 0) return;
             string header = Encoding.UTF8.GetString(buffer, 0, read);
 
             if (header.StartsWith("GET /health"))
@@ -214,7 +238,30 @@ namespace ClipSync
                 if (opcode == 0x1) // Text frame
                 {
                     string message = Encoding.UTF8.GetString(payload);
-                    BroadcastToOthers(id, message);
+
+                    // Check for Pair Request
+                    if (message.Contains("\"type\":\"pair_req\""))
+                    {
+                        string fromName = ExtractJson(message, "from_name") ?? "Unknown Device";
+                        string fromIp = ((IPEndPoint)client.Client.RemoteEndPoint).Address.ToString();
+                        bool allow = true;
+                        if (OnPairRequestReceived != null)
+                        {
+                            allow = OnPairRequestReceived(fromName, fromIp);
+                        }
+                        string respJson = "{\"type\":\"pair_resp\",\"status\":\"" + (allow ? "accepted" : "rejected") + "\"}";
+                        byte[] frame = CreateWebSocketTextFrame(respJson);
+                        await stream.WriteAsync(frame, 0, frame.Length, token);
+                        if (!allow) break;
+                    }
+                    else
+                    {
+                        if (OnClipboardMessageReceived != null && (message.Contains("\"type\":\"clipboard\"") || message.Contains("\"type\": \"clipboard\"")))
+                        {
+                            OnClipboardMessageReceived(message);
+                        }
+                        BroadcastToOthers(id, message);
+                    }
                 }
             }
         }
@@ -226,11 +273,7 @@ namespace ClipSync
             {
                 if (kv.Key != senderId && kv.Value.Connected)
                 {
-                    try
-                    {
-                        kv.Value.GetStream().Write(frame, 0, frame.Length);
-                    }
-                    catch { }
+                    try { kv.Value.GetStream().Write(frame, 0, frame.Length); } catch { }
                 }
             }
         }
@@ -297,36 +340,100 @@ namespace ClipSync
                 return Convert.ToBase64String(sha1.ComputeHash(Encoding.UTF8.GetBytes(magic)));
             }
         }
+
+        private static string ExtractJson(string json, string key)
+        {
+            Match m = Regex.Match(json, "\"" + key + "\":\\s*\"([^\"]+)\"");
+            return m.Success ? m.Groups[1].Value : null;
+        }
     }
 
     // =========================================================================
-    // LAN Auto-Discovery Service (Zero Config: Laptop 1 & Laptop 2 Auto-Connect)
+    // LAN Device Discovery Service (UDP Broadcast & Listener)
     // =========================================================================
     public class DiscoveryService
     {
-        private const int DISCOVERY_PORT = 8766;
+        public const int DISCOVERY_PORT = 8766;
         private CancellationTokenSource cts = new CancellationTokenSource();
-        public event Action<string> ServerDiscovered;
+        private ConcurrentDictionary<string, DiscoveredDevice> devices = new ConcurrentDictionary<string, DiscoveredDevice>();
+        public event Action OnDevicesChanged;
+        public Func<string, string, bool> OnUdpPairRequestReceived;
+        private ConcurrentDictionary<string, TaskCompletionSource<bool>> pendingPairRequests = new ConcurrentDictionary<string, TaskCompletionSource<bool>>();
 
-        public void StartBroadcasting(int serverPort)
+        public IEnumerable<DiscoveredDevice> GetDiscoveredDevices()
+        {
+            // Filter devices seen in the last 15 seconds
+            List<DiscoveredDevice> active = new List<DiscoveredDevice>();
+            DateTime now = DateTime.Now;
+            foreach (var d in devices.Values)
+            {
+                if ((now - d.LastSeen).TotalSeconds < 15)
+                {
+                    active.Add(d);
+                }
+            }
+            return active;
+        }
+
+        public async Task<bool> SendUdpPairRequestAsync(string targetIp, string myName, string myIp, int myPort)
+        {
+            var tcs = new TaskCompletionSource<bool>();
+            pendingPairRequests[targetIp] = tcs;
+
+            try
+            {
+                using (UdpClient udp = new UdpClient())
+                {
+                    udp.EnableBroadcast = true;
+                    IPEndPoint endpoint = new IPEndPoint(IPAddress.Parse(targetIp), DISCOVERY_PORT);
+                    string msg = "CLIPSYNC_PAIR_REQ:" + myName + ":" + myIp + ":" + myPort;
+                    byte[] data = Encoding.UTF8.GetBytes(msg);
+                    await udp.SendAsync(data, data.Length, endpoint);
+                }
+
+                Task timeoutTask = Task.Delay(30000);
+                Task completedTask = await Task.WhenAny(tcs.Task, timeoutTask);
+                if (completedTask == tcs.Task)
+                {
+                    return await tcs.Task;
+                }
+                return false;
+            }
+            catch
+            {
+                return false;
+            }
+            finally
+            {
+                TaskCompletionSource<bool> dummy;
+                pendingPairRequests.TryRemove(targetIp, out dummy);
+            }
+        }
+
+        public void StartBroadcasting(string myName, int myPort)
         {
             Task.Run(async () => {
                 using (UdpClient udp = new UdpClient())
                 {
                     udp.EnableBroadcast = true;
                     IPEndPoint endpoint = new IPEndPoint(IPAddress.Broadcast, DISCOVERY_PORT);
-                    byte[] data = Encoding.UTF8.GetBytes("CLIPSYNC_SERVER:" + serverPort);
 
                     while (!cts.IsCancellationRequested)
                     {
-                        try { await udp.SendAsync(data, data.Length, endpoint); } catch { }
-                        await Task.Delay(3000);
+                        try
+                        {
+                            string msg = "CLIPSYNC_DEV:" + myName + ":windows:" + myPort;
+                            byte[] data = Encoding.UTF8.GetBytes(msg);
+                            await udp.SendAsync(data, data.Length, endpoint);
+                        }
+                        catch { }
+                        await Task.Delay(2500);
                     }
                 }
             });
         }
 
-        public void StartListening()
+        public void StartListening(string myName)
         {
             Task.Run(async () => {
                 try
@@ -340,12 +447,70 @@ namespace ClipSync
                         {
                             UdpReceiveResult res = await udp.ReceiveAsync();
                             string msg = Encoding.UTF8.GetString(res.Buffer);
-                            if (msg.StartsWith("CLIPSYNC_SERVER:"))
+                            string remoteIp = res.RemoteEndPoint.Address.ToString();
+
+                            if (msg.StartsWith("CLIPSYNC_DEV:"))
                             {
-                                string portStr = msg.Substring(16);
-                                string serverIp = res.RemoteEndPoint.Address.ToString();
-                                string uri = "ws://" + serverIp + ":" + portStr + "/ws";
-                                if (ServerDiscovered != null) ServerDiscovered(uri);
+                                string[] parts = msg.Split(':');
+                                if (parts.Length >= 4)
+                                {
+                                    string devName = parts[1];
+                                    string devType = parts[2];
+                                    int port = int.Parse(parts[3]);
+
+                                    // Don't list ourselves
+                                    if (devName == myName) continue;
+
+                                    string key = remoteIp + ":" + port;
+                                    DiscoveredDevice dev;
+                                    if (!devices.TryGetValue(key, out dev))
+                                    {
+                                        dev = new DiscoveredDevice { Name = devName, DeviceType = devType, IP = remoteIp, Port = port };
+                                        devices[key] = dev;
+                                    }
+                                    dev.LastSeen = DateTime.Now;
+                                    if (OnDevicesChanged != null) OnDevicesChanged();
+                                }
+                            }
+                            else if (msg.StartsWith("CLIPSYNC_PAIR_REQ:"))
+                            {
+                                string[] parts = msg.Split(':');
+                                if (parts.Length >= 4)
+                                {
+                                    string fromName = parts[1];
+                                    string fromIp = parts[2];
+                                    int fromPort = int.Parse(parts[3]);
+
+                                    Task.Run(async () => {
+                                        bool allow = true;
+                                        if (OnUdpPairRequestReceived != null)
+                                        {
+                                            allow = OnUdpPairRequestReceived(fromName, fromIp);
+                                        }
+                                        string respMsg = "CLIPSYNC_PAIR_RESP:" + (allow ? "allow" : "deny") + ":" + myName;
+                                        byte[] respBytes = Encoding.UTF8.GetBytes(respMsg);
+                                        using (UdpClient respUdp = new UdpClient())
+                                        {
+                                            await respUdp.SendAsync(respBytes, respBytes.Length, new IPEndPoint(IPAddress.Parse(remoteIp), DISCOVERY_PORT));
+                                        }
+                                    });
+                                }
+                            }
+                            else if (msg.StartsWith("CLIPSYNC_PAIR_RESP:"))
+                            {
+                                string[] parts = msg.Split(':');
+                                if (parts.Length >= 3)
+                                {
+                                    string status = parts[1];
+                                    string fromName = parts[2];
+                                    bool isAllowed = status.Equals("allow", StringComparison.OrdinalIgnoreCase) || status.Equals("accepted", StringComparison.OrdinalIgnoreCase);
+
+                                    TaskCompletionSource<bool> tcs;
+                                    if (pendingPairRequests.TryGetValue(remoteIp, out tcs))
+                                    {
+                                        tcs.TrySetResult(isAllowed);
+                                    }
+                                }
                             }
                         }
                     }
@@ -357,6 +522,176 @@ namespace ClipSync
         public void Stop()
         {
             cts.Cancel();
+        }
+    }
+
+    // =========================================================================
+    // Modern Network Devices & Pairing Manager Form (UI)
+    // =========================================================================
+    public class DevicesForm : Form
+    {
+        private ListBox listDevices;
+        private Label lblMyIp;
+        private Label lblStatus;
+        private Button btnConnect;
+        private Button btnRefresh;
+        private DiscoveryService discovery;
+        private ClipSyncContext context;
+
+        public DevicesForm(DiscoveryService discoveryService, ClipSyncContext syncContext)
+        {
+            this.discovery = discoveryService;
+            this.context = syncContext;
+            InitializeComponent();
+
+            discovery.OnDevicesChanged += () => {
+                if (this.IsHandleCreated)
+                {
+                    this.BeginInvoke(new Action(RefreshDeviceList));
+                }
+            };
+            RefreshDeviceList();
+        }
+
+        private void InitializeComponent()
+        {
+            this.Text = "ClipSync — Network Devices & Pairing";
+            this.Size = new Size(500, 480);
+            this.StartPosition = FormStartPosition.CenterScreen;
+            this.FormBorderStyle = FormBorderStyle.FixedDialog;
+            this.MaximizeBox = false;
+            this.BackColor = Color.FromArgb(15, 23, 42);
+            this.ForeColor = Color.White;
+            this.Font = new Font("Segoe UI", 9.5f);
+
+            Label lblHeader = new Label
+            {
+                Text = "ClipSync Network Discovery",
+                Font = new Font("Segoe UI", 13f, FontStyle.Bold),
+                ForeColor = Color.White,
+                Location = new Point(20, 16),
+                AutoSize = true
+            };
+            this.Controls.Add(lblHeader);
+
+            lblMyIp = new Label
+            {
+                Text = "My Device: " + Environment.MachineName + " | IP: " + context.GetLocalIpAddress() + " (Port 8765)",
+                Font = new Font("Segoe UI", 9.5f),
+                ForeColor = Color.FromArgb(148, 163, 184),
+                Location = new Point(20, 48),
+                AutoSize = true
+            };
+            this.Controls.Add(lblMyIp);
+
+            Label lblListTitle = new Label
+            {
+                Text = "DISCOVERED DEVICES ON LOCAL NETWORK (WIFI / LAN)",
+                Font = new Font("Segoe UI", 8.5f, FontStyle.Bold),
+                ForeColor = Color.FromArgb(96, 165, 250),
+                Location = new Point(20, 85),
+                AutoSize = true
+            };
+            this.Controls.Add(lblListTitle);
+
+            listDevices = new ListBox
+            {
+                Location = new Point(20, 110),
+                Size = new Size(440, 220),
+                BackColor = Color.FromArgb(30, 41, 59),
+                ForeColor = Color.White,
+                BorderStyle = BorderStyle.FixedSingle,
+                Font = new Font("Segoe UI", 10.5f),
+                ItemHeight = 28
+            };
+            listDevices.SelectedIndexChanged += (s, e) => {
+                btnConnect.Enabled = listDevices.SelectedItem != null;
+            };
+            this.Controls.Add(listDevices);
+
+            lblStatus = new Label
+            {
+                Text = "Scanning for other laptops and phones on network...",
+                ForeColor = Color.FromArgb(148, 163, 184),
+                Location = new Point(20, 340),
+                Size = new Size(440, 30)
+            };
+            this.Controls.Add(lblStatus);
+
+            btnConnect = new Button
+            {
+                Text = "🔗 Send Connection Request",
+                Location = new Point(20, 380),
+                Size = new Size(240, 42),
+                BackColor = Color.FromArgb(37, 99, 235),
+                ForeColor = Color.White,
+                FlatStyle = FlatStyle.Flat,
+                Font = new Font("Segoe UI", 10f, FontStyle.Bold),
+                Enabled = false
+            };
+            btnConnect.Click += (s, e) => ConnectToSelected();
+            this.Controls.Add(btnConnect);
+
+            btnRefresh = new Button
+            {
+                Text = "🔄 Refresh",
+                Location = new Point(280, 380),
+                Size = new Size(180, 42),
+                BackColor = Color.FromArgb(51, 65, 85),
+                ForeColor = Color.White,
+                FlatStyle = FlatStyle.Flat
+            };
+            btnRefresh.Click += (s, e) => RefreshDeviceList();
+            this.Controls.Add(btnRefresh);
+        }
+
+        private void RefreshDeviceList()
+        {
+            listDevices.Items.Clear();
+            var devices = discovery.GetDiscoveredDevices();
+            int count = 0;
+            foreach (var d in devices)
+            {
+                listDevices.Items.Add(d);
+                count++;
+            }
+            if (count == 0)
+            {
+                lblStatus.Text = "No other devices detected yet. Ensure other device has ClipSync open on same Wi-Fi.";
+            }
+            else
+            {
+                lblStatus.Text = count + " device(s) found! Select one and click 'Send Connection Request'.";
+            }
+        }
+
+        private void ConnectToSelected()
+        {
+            DiscoveredDevice dev = listDevices.SelectedItem as DiscoveredDevice;
+            if (dev == null) return;
+
+            lblStatus.Text = "Sending connection request to " + dev.Name + " (" + dev.IP + ")... Waiting for approval...";
+            btnConnect.Enabled = false;
+
+            Task.Run(async () => {
+                bool ok = await context.RequestPairingAndConnect(dev);
+                if (this.IsHandleCreated)
+                {
+                    this.BeginInvoke(new Action(() => {
+                        btnConnect.Enabled = true;
+                        if (ok)
+                        {
+                            MessageBox.Show("✅ Connection APPROVED by " + dev.Name + "!\n\nMulti-device clipboard sync is now active.", "ClipSync Connected", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                            this.Close();
+                        }
+                        else
+                        {
+                            MessageBox.Show("❌ Connection to " + dev.Name + " was DECLINED or timed out.", "Connection Declined", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                            lblStatus.Text = "Connection declined by " + dev.Name + ".";
+                        }
+                    }));
+                }
+            });
         }
     }
 
@@ -374,6 +709,7 @@ namespace ClipSync
         private ClipboardListenerWindow listenerWindow;
         private EmbeddedRelayServer embeddedServer;
         private DiscoveryService discoveryService;
+        private DevicesForm activeDevicesForm;
 
         private ClientWebSocket webSocket;
         private CancellationTokenSource cts = new CancellationTokenSource();
@@ -400,29 +736,103 @@ namespace ClipSync
             StartNetworking();
         }
 
+        public string GetLocalIpAddress()
+        {
+            try
+            {
+                using (Socket socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, 0))
+                {
+                    socket.Connect("8.8.8.8", 65530);
+                    IPEndPoint endPoint = socket.LocalEndPoint as IPEndPoint;
+                    return endPoint.Address.ToString();
+                }
+            }
+            catch
+            {
+                return "127.0.0.1";
+            }
+        }
+
         private void StartNetworking()
         {
-            discoveryService = new DiscoveryService();
-            discoveryService.ServerDiscovered += (discoveredUrl) => {
-                if (serverUrl.Contains("127.0.0.1") || serverUrl.Contains("localhost"))
-                {
-                    serverUrl = discoveredUrl;
-                    UpdateStatus("Auto-Connected to " + discoveredUrl);
-                }
-            };
-            discoveryService.StartListening();
-
-            // Try to start built-in server on port 8765
+            // Start embedded server
             embeddedServer = new EmbeddedRelayServer(8765);
-            if (embeddedServer.TryStart())
-            {
-                // This machine is hosting the relay! Broadcast announcement to LAN
-                discoveryService.StartBroadcasting(8765);
-                serverUrl = "ws://127.0.0.1:8765/ws";
-            }
+            embeddedServer.OnPairRequestReceived = OnIncomingPairRequest;
+            embeddedServer.OnClipboardMessageReceived = (msg) => ProcessIncomingMessage(msg);
+            embeddedServer.TryStart();
 
-            // Start WebSocket Worker thread
+            discoveryService = new DiscoveryService();
+            discoveryService.OnUdpPairRequestReceived = (fromName, fromIp) => OnIncomingPairRequest(fromName, fromIp);
+            discoveryService.StartBroadcasting(deviceName, 8765);
+            discoveryService.StartListening(deviceName);
+
+            // Start WebSocket Client loop
             Task.Run(() => RunWebSocketLoop());
+        }
+
+        private bool OnIncomingPairRequest(string fromName, string fromIp)
+        {
+            DialogResult res = MessageBox.Show(
+                "📱 Device: " + fromName + " (" + fromIp + ")\n\nwants to connect and sync clipboard with this computer.\n\nDo you want to ALLOW this device?",
+                "ClipSync — Incoming Connection Request",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Question
+            );
+            return res == DialogResult.Yes;
+        }
+
+        public async Task<bool> RequestPairingAndConnect(DiscoveredDevice dev)
+        {
+            if (dev.DeviceType == "android")
+            {
+                return await discoveryService.SendUdpPairRequestAsync(dev.IP, deviceName, GetLocalIpAddress(), 8765);
+            }
+            else
+            {
+                try
+                {
+                    string targetWs = "ws://" + dev.IP + ":" + dev.Port + "/ws";
+                    using (ClientWebSocket ws = new ClientWebSocket())
+                    {
+                        ws.Options.Proxy = null;
+                        var connectCts = new CancellationTokenSource(5000);
+                        await ws.ConnectAsync(new Uri(targetWs), connectCts.Token);
+
+                        // Send pairing request
+                        string pairReq = "{\"type\":\"pair_req\",\"from_name\":\"" + deviceName + "\",\"from_ip\":\"" + GetLocalIpAddress() + "\"}";
+                        byte[] bytes = Encoding.UTF8.GetBytes(pairReq);
+                        await ws.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, CancellationToken.None);
+
+                        // Wait for response
+                        byte[] buf = new byte[4096];
+                        var r = await ws.ReceiveAsync(new ArraySegment<byte>(buf), CancellationToken.None);
+                        string resp = Encoding.UTF8.GetString(buf, 0, r.Count);
+
+                        if (resp.Contains("\"status\":\"accepted\""))
+                        {
+                            serverUrl = targetWs;
+                            SaveConfig();
+                            cts.Cancel();
+                            cts = new CancellationTokenSource();
+                            Task.Run(() => RunWebSocketLoop());
+                            return true;
+                        }
+                    }
+                }
+                catch { }
+
+                return await discoveryService.SendUdpPairRequestAsync(dev.IP, deviceName, GetLocalIpAddress(), 8765);
+            }
+        }
+
+        private void ShowDevicesWindow()
+        {
+            if (activeDevicesForm == null || activeDevicesForm.IsDisposed)
+            {
+                activeDevicesForm = new DevicesForm(discoveryService, this);
+            }
+            activeDevicesForm.Show();
+            activeDevicesForm.BringToFront();
         }
 
         private void EnsureFirewallConfigured(bool userTriggered)
@@ -445,14 +855,9 @@ namespace ClipSync
                 if (output.Contains("ClipSync Server"))
                 {
                     File.WriteAllText(marker, "ok");
-                    if (userTriggered)
-                    {
-                        MessageBox.Show("Windows Firewall rule 'ClipSync Server' is active and allowing traffic!", "ClipSync", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                    }
                     return;
                 }
 
-                // Auto elevate netsh command
                 ProcessStartInfo psi = new ProcessStartInfo();
                 psi.FileName = "netsh";
                 psi.Arguments = "advfirewall firewall add rule name=\"ClipSync Server\" dir=in action=allow protocol=TCP localport=8765,8766";
@@ -465,19 +870,9 @@ namespace ClipSync
                 if (p.ExitCode == 0)
                 {
                     File.WriteAllText(marker, "ok");
-                    if (userTriggered)
-                    {
-                        MessageBox.Show("Ports 8765 and 8766 are now open in Windows Firewall!", "ClipSync", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                    }
                 }
             }
-            catch (Exception ex)
-            {
-                if (userTriggered)
-                {
-                    MessageBox.Show("Could not add firewall rule: " + ex.Message, "ClipSync", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                }
-            }
+            catch { }
         }
 
         private void LoadConfig()
@@ -492,9 +887,18 @@ namespace ClipSync
                 }
                 else
                 {
-                    string defaultJson = "{\n  \"server_url\": \"" + serverUrl + "\",\n  \"device_name\": \"" + deviceName + "\",\n  \"auto_start\": true\n}";
-                    File.WriteAllText(configPath, defaultJson);
+                    SaveConfig();
                 }
+            }
+            catch { }
+        }
+
+        private void SaveConfig()
+        {
+            try
+            {
+                string json = "{\n  \"server_url\": \"" + serverUrl + "\",\n  \"device_name\": \"" + deviceName + "\",\n  \"auto_start\": true\n}";
+                File.WriteAllText(configPath, json);
             }
             catch { }
         }
@@ -518,8 +922,12 @@ namespace ClipSync
             statusItem.Enabled = false;
             trayMenu.MenuItems.Add(statusItem);
 
-            trayMenu.MenuItems.Add(new MenuItem("Server: Auto-Detect (Active)") { Enabled = false });
+            trayMenu.MenuItems.Add(new MenuItem("This PC IP: " + GetLocalIpAddress() + " (Port 8765)") { Enabled = false });
             trayMenu.MenuItems.Add("-");
+
+            MenuItem devicesItem = new MenuItem("📶 Nearby Devices & Pairing...", (s, e) => ShowDevicesWindow());
+            devicesItem.DefaultItem = true;
+            trayMenu.MenuItems.Add(devicesItem);
 
             pauseItem = new MenuItem("Pause Sync", (s, e) => {
                 isPaused = !isPaused;
@@ -536,12 +944,7 @@ namespace ClipSync
             autoStartItem.Checked = IsAutoStartEnabled();
             trayMenu.MenuItems.Add(autoStartItem);
 
-            trayMenu.MenuItems.Add("Allow Firewall Ports (8765)...", (s, e) => EnsureFirewallConfigured(true));
-
             trayMenu.MenuItems.Add("-");
-            trayMenu.MenuItems.Add("Settings (config.json)", (s, e) => {
-                try { Process.Start("notepad.exe", configPath); } catch { }
-            });
             trayMenu.MenuItems.Add("Exit ClipSync", (s, e) => {
                 cts.Cancel();
                 if (listenerWindow != null) listenerWindow.Cleanup();
@@ -556,6 +959,7 @@ namespace ClipSync
             trayIcon.Icon = System.Drawing.SystemIcons.Application;
             trayIcon.ContextMenu = trayMenu;
             trayIcon.Visible = true;
+            trayIcon.DoubleClick += (s, e) => ShowDevicesWindow();
         }
 
         private void UpdateStatus(string text)
@@ -663,7 +1067,6 @@ namespace ClipSync
                 string escapedData = EscapeJson(text);
                 string json = "{\"type\":\"clipboard\",\"data\":\"" + escapedData + "\",\"device_name\":\"" + deviceName + "\",\"device_type\":\"windows\",\"timestamp\":" + DateTimeOffset.UtcNow.ToUnixTimeSeconds() + "}";
 
-                // Also relay through embedded server directly
                 if (embeddedServer != null && embeddedServer.IsRunning)
                 {
                     embeddedServer.BroadcastRaw(json);
@@ -731,7 +1134,7 @@ namespace ClipSync
                 }
                 catch
                 {
-                    UpdateStatus("Waiting for Sync Peer...");
+                    UpdateStatus("Ready (Hosting / Listening)");
                 }
 
                 if (!cts.IsCancellationRequested)
@@ -833,7 +1236,7 @@ namespace ClipSync
             {
                 if (!createdNew)
                 {
-                    MessageBox.Show("ClipSync is already running in your System Tray (near clock).", "ClipSync", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    MessageBox.Show("ClipSync is already running in your System Tray (near clock). Double click its icon to open Devices & Pairing.", "ClipSync", MessageBoxButtons.OK, MessageBoxIcon.Information);
                     return;
                 }
                 Application.EnableVisualStyles();

@@ -14,6 +14,7 @@ import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
 import android.util.Log;
+import android.widget.Toast;
 
 import org.json.JSONObject;
 
@@ -38,6 +39,10 @@ public class ClipboardSyncService extends Service implements ClipboardManager.On
     private static ClipboardSyncService sInstance;
     private AppPreferences preferences;
     private ClipboardManager clipboardManager;
+
+    public AppPreferences getPreferences() {
+        return preferences;
+    }
     private SyncWebSocketClient webSocketClient;
     private Handler mainHandler;
     private Thread firebaseThread;
@@ -137,6 +142,36 @@ public class ClipboardSyncService extends Service implements ClipboardManager.On
         updateNotification("Disconnected. Retrying...");
         broadcastStatus("Disconnected (Retrying...)");
         scheduleReconnect();
+    }
+
+    public void onPairResponse(boolean accepted) {
+        if (accepted) {
+            updateNotification("Connected & Allowed: " + preferences.getServerUrl());
+            broadcastStatus("Connected & Allowed");
+            showToast("✅ Device ALLOWED connection! Clipboard sync active.");
+        } else {
+            updateNotification("Connection Declined");
+            broadcastStatus("Connection Declined");
+            showToast("❌ Connection was DECLINED by other device.");
+            disconnectSync();
+        }
+    }
+
+    private void showToast(String msg) {
+        mainHandler.post(new ShowToastRunnable(getApplicationContext(), msg));
+    }
+
+    private static class ShowToastRunnable implements Runnable {
+        private final Context ctx;
+        private final String message;
+        public ShowToastRunnable(Context ctx, String message) {
+            this.ctx = ctx;
+            this.message = message;
+        }
+        @Override
+        public void run() {
+            Toast.makeText(ctx, message, Toast.LENGTH_LONG).show();
+        }
     }
 
     private void connectFirebase() {
