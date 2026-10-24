@@ -579,7 +579,7 @@ public class ClipboardSyncService extends Service implements ClipboardManager.On
 
         builder.setContentTitle("ClipSync Active")
                 .setContentText(text)
-                .setSmallIcon(android.R.drawable.stat_notify_sync)
+                .setSmallIcon(R.drawable.ic_stat_sync)
                 .setOngoing(true);
 
         if (pendingIntent != null) {
@@ -595,7 +595,7 @@ public class ClipboardSyncService extends Service implements ClipboardManager.On
             );
 
             Notification.Action syncAction = new Notification.Action.Builder(
-                    android.R.drawable.stat_notify_sync,
+                    R.drawable.ic_stat_sync,
                     "📋 SYNC TO PC",
                     syncPendingIntent
             ).build();

@@ -15,6 +15,7 @@ import android.os.PowerManager;
 import android.provider.Settings;
 import android.view.View;
 import android.widget.Button;
+import android.widget.CompoundButton;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.RadioButton;
@@ -50,51 +51,61 @@ public class MainActivity extends Activity implements View.OnClickListener, andr
     private Handler mainHandler;
     private final Set<String> discoveredKeys = new HashSet<String>();
 
-    private static class SafeCrashHandler implements Thread.UncaughtExceptionHandler {
+    private static class SwitchChangeListener implements CompoundButton.OnCheckedChangeListener {
+        private final MainActivity act;
+        public SwitchChangeListener(MainActivity act) { this.act = act; }
         @Override
-        public void uncaughtException(Thread t, Throwable e) {
-            Log.e("ClipSyncCrash", "Uncaught exception in " + (t != null ? t.getName() : "unknown"), e);
+        public void onCheckedChanged(CompoundButton buttonView, boolean isChecked) {
+            try {
+                act.preferences.setServiceActive(isChecked);
+                if (isChecked) {
+                    act.startSyncService();
+                } else {
+                    act.stopSyncService();
+                }
+            } catch (Throwable t) {
+                Log.e("MainActivity", "Error in switch change: " + t.getMessage());
+            }
         }
     }
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-
-        Thread.setDefaultUncaughtExceptionHandler(new SafeCrashHandler());
-
-        setContentView(R.layout.activity_main);
-
-        mainHandler = new Handler(Looper.getMainLooper());
-        preferences = new AppPreferences(this);
-        initViews();
-
-        // Android 13+ Notification permission first
-        if (Build.VERSION.SDK_INT >= 33) {
-            try {
-                if (checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
-                    requestPermissions(new String[]{android.Manifest.permission.POST_NOTIFICATIONS}, 1001);
-                }
-            } catch (Throwable ignored) {}
-        }
-
-        loadSavedSettings();
-
         try {
-            statusReceiver = new StatusReceiver(this);
-            IntentFilter filter = new IntentFilter();
-            filter.addAction(ClipboardSyncService.ACTION_STATUS_UPDATE);
-            filter.addAction(ClipboardSyncService.ACTION_DEVICE_DISCOVERED);
-            filter.addAction(ClipboardSyncService.ACTION_PAIR_REQUEST);
-            filter.addAction(ClipboardSyncService.ACTION_PAIR_RESPONSE);
+            setContentView(R.layout.activity_main);
+            mainHandler = new Handler(Looper.getMainLooper());
+            preferences = new AppPreferences(this);
+            initViews();
 
             if (Build.VERSION.SDK_INT >= 33) {
-                registerReceiver(statusReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
-            } else {
-                registerReceiver(statusReceiver, filter);
+                try {
+                    if (checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                        requestPermissions(new String[]{android.Manifest.permission.POST_NOTIFICATIONS}, 1001);
+                    }
+                } catch (Throwable ignored) {}
+            }
+
+            loadSavedSettings();
+
+            try {
+                statusReceiver = new StatusReceiver(this);
+                IntentFilter filter = new IntentFilter();
+                filter.addAction(ClipboardSyncService.ACTION_STATUS_UPDATE);
+                filter.addAction(ClipboardSyncService.ACTION_DEVICE_DISCOVERED);
+                filter.addAction(ClipboardSyncService.ACTION_PAIR_REQUEST);
+                filter.addAction(ClipboardSyncService.ACTION_PAIR_RESPONSE);
+
+                if (Build.VERSION.SDK_INT >= 33) {
+                    registerReceiver(statusReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
+                } else {
+                    registerReceiver(statusReceiver, filter);
+                }
+            } catch (Throwable t) {
+                Log.e("MainActivity", "Error registering receiver", t);
             }
         } catch (Throwable t) {
-            Log.e("MainActivity", "Error registering receiver", t);
+            Log.e("MainActivity", "Error in onCreate", t);
         }
     }
 
@@ -104,26 +115,32 @@ public class MainActivity extends Activity implements View.OnClickListener, andr
     @Override
     protected void onResume() {
         super.onResume();
-        loadCachedDiscoveredDevices();
-        autoSyncClipboardOnResume();
+        try {
+            loadCachedDiscoveredDevices();
+            autoSyncClipboardOnResume();
+        } catch (Throwable ignored) {}
     }
 
     private void autoSyncClipboardOnResume() {
-        if (preferences != null && preferences.isServiceActive()) {
-            ClipboardSyncService service = ClipboardSyncService.getInstance();
-            if (service != null) {
-                service.syncCurrentClipboardNow();
+        try {
+            if (preferences != null && preferences.isServiceActive()) {
+                ClipboardSyncService service = ClipboardSyncService.getInstance();
+                if (service != null) {
+                    service.syncCurrentClipboardNow();
+                }
             }
-        }
+        } catch (Throwable ignored) {}
     }
 
     private void loadCachedDiscoveredDevices() {
-        ClipboardSyncService service = ClipboardSyncService.getInstance();
-        if (service != null) {
-            for (ClipboardSyncService.DiscoveredDeviceItem item : service.getDiscoveredDevices()) {
-                onDeviceDiscovered(item.name, item.type, item.ip, item.port);
+        try {
+            ClipboardSyncService service = ClipboardSyncService.getInstance();
+            if (service != null) {
+                for (ClipboardSyncService.DiscoveredDeviceItem item : service.getDiscoveredDevices()) {
+                    onDeviceDiscovered(item.name, item.type, item.ip, item.port);
+                }
             }
-        }
+        } catch (Throwable ignored) {}
     }
 
     private void initViews() {
@@ -146,62 +163,60 @@ public class MainActivity extends Activity implements View.OnClickListener, andr
         Button btnBattery = (Button) findViewById(R.id.btnBattery);
         Button btnTestPush = (Button) findViewById(R.id.btnTestPush);
 
-        switchService.setOnClickListener(this);
-        btnSaveConfig.setOnClickListener(this);
-        btnBattery.setOnClickListener(this);
-        btnTestPush.setOnClickListener(this);
+        if (switchService != null) {
+            switchService.setOnCheckedChangeListener(new SwitchChangeListener(this));
+        }
+        if (btnSaveConfig != null) btnSaveConfig.setOnClickListener(this);
+        if (btnBattery != null) btnBattery.setOnClickListener(this);
+        if (btnTestPush != null) btnTestPush.setOnClickListener(this);
         if (btnScanDevices != null) btnScanDevices.setOnClickListener(this);
         if (btnDirectConnect != null) btnDirectConnect.setOnClickListener(this);
     }
 
     @Override
     public void onClick(View v) {
-        int id = v.getId();
-        if (id == R.id.switchService) {
-            boolean isChecked = switchService.isChecked();
-            preferences.setServiceActive(isChecked);
-            if (isChecked) {
-                startSyncService();
-            } else {
-                stopSyncService();
-            }
-        } else if (id == R.id.btnSaveConfig) {
-            saveCurrentSettings();
-            Toast.makeText(this, "Settings saved. Reconnecting...", Toast.LENGTH_SHORT).show();
-            if (switchService.isChecked()) {
-                startSyncService();
-            }
-        } else if (id == R.id.btnBattery) {
-            requestBatteryOptimizationExemption();
-        } else if (id == R.id.btnDirectConnect) {
-            String ip = etDirectIp != null ? etDirectIp.getText().toString().trim() : "";
-            if (ip.isEmpty()) {
-                Toast.makeText(this, "Please enter PC IP address (e.g. 192.168.0.108)", Toast.LENGTH_SHORT).show();
-            } else {
-                String targetWs = "ws://" + ip + ":8765/ws";
-                preferences.setServerUrl(targetWs);
-                preferences.setPairedDeviceName("PC (" + ip + ")");
-                etServerUrl.setText(targetWs);
+        try {
+            int id = v.getId();
+            if (id == R.id.btnSaveConfig) {
                 saveCurrentSettings();
-                startSyncService();
-                Toast.makeText(this, "Connecting directly to " + ip + "...", Toast.LENGTH_SHORT).show();
+                Toast.makeText(this, "Settings saved. Reconnecting...", Toast.LENGTH_SHORT).show();
+                if (switchService != null && switchService.isChecked()) {
+                    startSyncService();
+                }
+            } else if (id == R.id.btnBattery) {
+                requestBatteryOptimizationExemption();
+            } else if (id == R.id.btnDirectConnect) {
+                String ip = etDirectIp != null ? etDirectIp.getText().toString().trim() : "";
+                if (ip.isEmpty()) {
+                    Toast.makeText(this, "Please enter PC IP address (e.g. 192.168.0.108)", Toast.LENGTH_SHORT).show();
+                } else {
+                    String targetWs = "ws://" + ip + ":8765/ws";
+                    preferences.setServerUrl(targetWs);
+                    preferences.setPairedDeviceName("PC (" + ip + ")");
+                    if (etServerUrl != null) etServerUrl.setText(targetWs);
+                    saveCurrentSettings();
+                    startSyncService();
+                    Toast.makeText(this, "Connecting directly to " + ip + "...", Toast.LENGTH_SHORT).show();
+                }
+            } else if (id == R.id.btnScanDevices) {
+                discoveredKeys.clear();
+                if (containerDevices != null) containerDevices.removeAllViews();
+                if (tvScanStatus != null) tvScanStatus.setText("Scanning Wi-Fi for laptops and other devices...");
+                ClipboardSyncService service = ClipboardSyncService.getInstance();
+                if (service != null) service.sendDiscoveryBroadcast();
+            } else if (id == R.id.btnTestPush) {
+                ClipboardSyncService service = ClipboardSyncService.getInstance();
+                if (service != null) {
+                    String testMsg = "Hello from Android (" + preferences.getDeviceName() + ") at " + new java.util.Date();
+                    service.sendToRemote(testMsg);
+                    if (tvLatestClipboard != null) tvLatestClipboard.setText(testMsg);
+                    Toast.makeText(this, "Sent test message to PC!", Toast.LENGTH_SHORT).show();
+                } else {
+                    Toast.makeText(this, "Service not running. Please turn ON switch above.", Toast.LENGTH_SHORT).show();
+                }
             }
-        } else if (id == R.id.btnScanDevices) {
-            discoveredKeys.clear();
-            if (containerDevices != null) containerDevices.removeAllViews();
-            if (tvScanStatus != null) tvScanStatus.setText("Scanning Wi-Fi for laptops and other devices...");
-            ClipboardSyncService service = ClipboardSyncService.getInstance();
-            if (service != null) service.sendDiscoveryBroadcast();
-        } else if (id == R.id.btnTestPush) {
-            ClipboardSyncService service = ClipboardSyncService.getInstance();
-            if (service != null) {
-                String testMsg = "Hello from Android (" + preferences.getDeviceName() + ") at " + new java.util.Date();
-                service.sendToRemote(testMsg);
-                tvLatestClipboard.setText(testMsg);
-                Toast.makeText(this, "Sent test message to PC!", Toast.LENGTH_SHORT).show();
-            } else {
-                Toast.makeText(this, "Service not running. Please turn ON switch above.", Toast.LENGTH_SHORT).show();
-            }
+        } catch (Throwable t) {
+            Log.e("MainActivity", "Error in onClick", t);
         }
     }
 
@@ -447,16 +462,21 @@ public class MainActivity extends Activity implements View.OnClickListener, andr
                 try {
                     startForegroundService(intent);
                 } catch (Throwable t) {
-                    startService(intent);
+                    try {
+                        startService(intent);
+                    } catch (Throwable ignored) {}
                 }
             } else {
                 startService(intent);
             }
-            tvConnectionStatus.setText("Status: Service Running");
+            if (tvConnectionStatus != null) {
+                tvConnectionStatus.setText("Status: Service Running");
+            }
         } catch (Throwable t) {
             Log.e("MainActivity", "Failed to start sync service", t);
-            tvConnectionStatus.setText("Status: Stopped (Permission required)");
-            Toast.makeText(this, "Notification permission needed for background sync", Toast.LENGTH_SHORT).show();
+            if (tvConnectionStatus != null) {
+                tvConnectionStatus.setText("Status: Stopped (Permission required)");
+            }
         }
     }
 
