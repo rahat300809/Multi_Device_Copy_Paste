@@ -100,6 +100,18 @@ public class ClipboardSyncService extends Service implements ClipboardManager.On
         return sInstance;
     }
 
+    public String getCurrentStatusDescription() {
+        if (webSocketClient != null && webSocketClient.isOpen()) {
+            String paired = preferences != null ? preferences.getPairedDeviceName() : "";
+            return "Connected to " + (!paired.isEmpty() ? paired : "PC");
+        }
+        String paired = preferences != null ? preferences.getPairedDeviceName() : "";
+        if (!paired.isEmpty()) {
+            return "Active (Searching for " + paired + "...)";
+        }
+        return "Active (Scanning Wi-Fi for PC...)";
+    }
+
     @Override
     public void onCreate() {
         super.onCreate();
@@ -144,16 +156,21 @@ public class ClipboardSyncService extends Service implements ClipboardManager.On
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        if (intent != null) {
-            String action = intent.getAction();
-            if (ACTION_BROADCAST_COPY.equals(action)) {
-                String text = intent.getStringExtra(EXTRA_CLIPBOARD_TEXT);
-                if (text != null && !text.isEmpty()) {
-                    sendToRemote(text);
+        try {
+            safeStartForeground("ClipSync Active (Background)");
+            if (intent != null) {
+                String action = intent.getAction();
+                if (ACTION_BROADCAST_COPY.equals(action)) {
+                    String text = intent.getStringExtra(EXTRA_CLIPBOARD_TEXT);
+                    if (text != null && !text.isEmpty()) {
+                        sendToRemote(text);
+                    }
+                } else if (ACTION_TRIGGER_SYNC.equals(action)) {
+                    syncCurrentClipboardNow();
                 }
-            } else if (ACTION_TRIGGER_SYNC.equals(action)) {
-                syncCurrentClipboardNow();
             }
+        } catch (Throwable t) {
+            Log.e(TAG, "Error in onStartCommand: " + t.getMessage());
         }
         return START_STICKY;
     }
@@ -214,9 +231,15 @@ public class ClipboardSyncService extends Service implements ClipboardManager.On
 
     public synchronized void connectSync() {
         disconnectSync();
-        String mode = preferences.getMode();
+        String mode = preferences != null ? preferences.getMode() : "websocket";
 
         if ("websocket".equalsIgnoreCase(mode)) {
+            String baseUrl = preferences != null ? preferences.getServerUrl() : "";
+            if (baseUrl == null || baseUrl.trim().isEmpty() || baseUrl.contains("127.0.0.1")) {
+                updateNotification("ClipSync Active (Scanning for PC...)");
+                broadcastStatus("Active (Scanning for PC...)");
+                return;
+            }
             connectWebSocket();
         } else {
             connectFirebase();
@@ -226,6 +249,11 @@ public class ClipboardSyncService extends Service implements ClipboardManager.On
     private void connectWebSocket() {
         try {
             String baseUrl = preferences.getServerUrl();
+            if (baseUrl == null || baseUrl.trim().isEmpty()) {
+                updateNotification("ClipSync Active (Scanning for PC...)");
+                broadcastStatus("Active (Scanning for PC...)");
+                return;
+            }
             String deviceName = preferences.getDeviceName();
             String fullUriStr = baseUrl + (baseUrl.contains("?") ? "&" : "?") +
                     "device_name=" + java.net.URLEncoder.encode(deviceName, "UTF-8") +
@@ -243,8 +271,10 @@ public class ClipboardSyncService extends Service implements ClipboardManager.On
     }
 
     public void onWebSocketOpen() {
-        updateNotification("Connected to " + preferences.getServerUrl());
-        broadcastStatus("Connected (Docker / Relay)");
+        String paired = preferences != null ? preferences.getPairedDeviceName() : "";
+        String target = !paired.isEmpty() ? paired : "PC";
+        updateNotification("Connected to " + target);
+        broadcastStatus("Connected to " + target);
         if (pendingOutboundText != null) {
             String toSend = pendingOutboundText;
             pendingOutboundText = null;
@@ -257,8 +287,10 @@ public class ClipboardSyncService extends Service implements ClipboardManager.On
     }
 
     public void onWebSocketClosed() {
-        updateNotification("Disconnected. Retrying...");
-        broadcastStatus("Disconnected (Retrying...)");
+        String paired = preferences != null ? preferences.getPairedDeviceName() : "";
+        String target = !paired.isEmpty() ? paired : "PC";
+        updateNotification("ClipSync Active (Searching for " + target + "...)");
+        broadcastStatus("Active (Searching for " + target + "...)");
         scheduleReconnect();
     }
 
@@ -545,12 +577,6 @@ public class ClipboardSyncService extends Service implements ClipboardManager.On
 
     private void safeStartForeground(String text) {
         try {
-            if (Build.VERSION.SDK_INT >= 33) {
-                if (checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
-                    Log.w(TAG, "Notification permission not yet granted; running in standard background mode");
-                    return;
-                }
-            }
             createNotificationChannel();
             Notification notif = buildNotification(text);
             if (notif != null) {
@@ -580,9 +606,12 @@ public class ClipboardSyncService extends Service implements ClipboardManager.On
                 builder = new Notification.Builder(this);
             }
 
+            int iconRes = R.drawable.ic_stat_sync;
+            if (iconRes == 0) iconRes = R.drawable.ic_launcher;
+
             builder.setContentTitle("ClipSync Active")
                     .setContentText(text)
-                    .setSmallIcon(R.drawable.ic_stat_sync)
+                    .setSmallIcon(iconRes)
                     .setOngoing(true);
 
             if (pendingIntent != null) {
@@ -812,8 +841,14 @@ public class ClipboardSyncService extends Service implements ClipboardManager.On
 
     @Override
     public void onDestroy() {
+        sInstance = null;
         isDestroyed = true;
         isDiscoveryRunning = false;
+        try {
+            if (clipboardManager != null) {
+                clipboardManager.removePrimaryClipChangedListener(this);
+            }
+        } catch (Throwable ignored) {}
         if (multicastLock != null && multicastLock.isHeld()) {
             try { multicastLock.release(); } catch (Exception ignored) {}
             multicastLock = null;

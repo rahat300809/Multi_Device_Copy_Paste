@@ -60,8 +60,10 @@ public class MainActivity extends Activity implements View.OnClickListener, andr
                 act.preferences.setServiceActive(isChecked);
                 if (isChecked) {
                     act.startSyncService();
+                    Toast.makeText(act, "✅ ClipSync Service is running in the background", Toast.LENGTH_SHORT).show();
                 } else {
                     act.stopSyncService();
+                    Toast.makeText(act, "ClipSync Service Stopped", Toast.LENGTH_SHORT).show();
                 }
             } catch (Throwable t) {
                 Log.e("MainActivity", "Error in switch change: " + t.getMessage());
@@ -116,6 +118,7 @@ public class MainActivity extends Activity implements View.OnClickListener, andr
     protected void onResume() {
         super.onResume();
         try {
+            syncServiceSwitchState();
             loadCachedDiscoveredDevices();
             autoSyncClipboardOnResume();
         } catch (Throwable ignored) {}
@@ -418,12 +421,49 @@ public class MainActivity extends Activity implements View.OnClickListener, andr
     }
 
     public void updateStatusFromReceiver(String status) {
-        if (tvConnectionStatus != null) {
+        if (tvConnectionStatus != null && status != null) {
             tvConnectionStatus.setText("Status: " + status);
+            if (status.startsWith("Connected")) {
+                tvConnectionStatus.setTextColor(0xFF38BDF8); // Cyan
+            } else if (status.startsWith("Active")) {
+                tvConnectionStatus.setTextColor(0xFF4ADE80); // Green
+            } else if (status.startsWith("Stopped") || status.startsWith("Declined")) {
+                tvConnectionStatus.setTextColor(0xFFF87171); // Red
+            } else {
+                tvConnectionStatus.setTextColor(0xFFE2E8F0);
+            }
         }
         if (status != null && status.startsWith("Received: ") && tvLatestClipboard != null) {
             tvLatestClipboard.setText(status.substring(10));
         }
+    }
+
+    private void syncServiceSwitchState() {
+        try {
+            ClipboardSyncService service = ClipboardSyncService.getInstance();
+            boolean isRunning = (service != null);
+            boolean shouldBeActive = isRunning || preferences.isServiceActive();
+
+            if (switchService != null) {
+                switchService.setOnCheckedChangeListener(null);
+                switchService.setChecked(shouldBeActive);
+                switchService.setOnCheckedChangeListener(new SwitchChangeListener(this));
+            }
+
+            if (tvConnectionStatus != null) {
+                if (isRunning) {
+                    String status = service.getCurrentStatusDescription();
+                    updateStatusFromReceiver(status);
+                } else if (!shouldBeActive) {
+                    tvConnectionStatus.setText("Status: Stopped");
+                    tvConnectionStatus.setTextColor(0xFF94A3B8);
+                }
+            }
+
+            if (shouldBeActive && !isRunning) {
+                startSyncService();
+            }
+        } catch (Throwable ignored) {}
     }
 
     private void loadSavedSettings() {
@@ -437,13 +477,7 @@ public class MainActivity extends Activity implements View.OnClickListener, andr
         etServerUrl.setText(preferences.getServerUrl());
         etDeviceName.setText(preferences.getDeviceName());
 
-        boolean active = preferences.isServiceActive();
-        if (switchService != null) {
-            switchService.setChecked(active);
-        }
-        if (active && (ClipboardSyncService.getInstance() == null)) {
-            startSyncService();
-        }
+        syncServiceSwitchState();
     }
 
     private void saveCurrentSettings() {
@@ -461,22 +495,26 @@ public class MainActivity extends Activity implements View.OnClickListener, andr
     private void startSyncService() {
         try {
             Intent intent = new Intent(this, ClipboardSyncService.class);
-            try {
-                startService(intent);
-            } catch (Throwable t) {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                try {
+                    startForegroundService(intent);
+                } catch (Throwable t) {
                     try {
-                        startForegroundService(intent);
+                        startService(intent);
                     } catch (Throwable ignored) {}
                 }
+            } else {
+                startService(intent);
             }
             if (tvConnectionStatus != null) {
-                tvConnectionStatus.setText("Status: Service Running");
+                tvConnectionStatus.setText("Status: Active (Scanning for PC...)");
+                tvConnectionStatus.setTextColor(0xFF4ADE80);
             }
         } catch (Throwable t) {
             Log.e("MainActivity", "Failed to start sync service", t);
             if (tvConnectionStatus != null) {
                 tvConnectionStatus.setText("Status: Stopped");
+                tvConnectionStatus.setTextColor(0xFF94A3B8);
             }
         }
     }
@@ -500,7 +538,10 @@ public class MainActivity extends Activity implements View.OnClickListener, andr
         try {
             Intent intent = new Intent(this, ClipboardSyncService.class);
             stopService(intent);
-            tvConnectionStatus.setText("Status: Stopped");
+            if (tvConnectionStatus != null) {
+                tvConnectionStatus.setText("Status: Stopped");
+                tvConnectionStatus.setTextColor(0xFF94A3B8);
+            }
         } catch (Throwable ignored) {}
     }
 
