@@ -27,8 +27,9 @@ if not exist "build\bin" mkdir "build\bin"
 "%BUILD_TOOLS%\aapt2.exe" link -o build\base.apk -I "%PLATFORM%" --manifest app\src\main\AndroidManifest.xml --min-sdk-version 26 --target-sdk-version 34 --version-code 1 --version-name "1.0.0" --java build\gen build\compiled_res.zip --auto-add-overlay
 
 echo [*] Step 2: Compiling Java source files with javac...
-del /q build\bin\*.* 2>nul
-"%JAVAC%" -g:none -encoding UTF-8 -target 8 -source 8 -cp "%PLATFORM%;libs\Java-WebSocket-1.5.6.jar" -d build\bin build\gen\com\clipsync\app\R.java app\src\main\java\com\clipsync\app\*.java
+if exist "build\bin" rmdir /s /q "build\bin"
+mkdir "build\bin"
+"%JAVAC%" -g -encoding UTF-8 -target 8 -source 8 -cp "%PLATFORM%;libs\Java-WebSocket-1.5.6.jar" -d build\bin build\gen\com\clipsync\app\R.java app\src\main\java\com\clipsync\app\*.java
 
 echo [*] Step 3: Compiling classes to DEX with d8...
 call "%BUILD_TOOLS%\d8.bat" --min-api 26 --output build --lib "%PLATFORM%" build\bin\com\clipsync\app\*.class libs\Java-WebSocket-1.5.6.jar
@@ -51,4 +52,3 @@ echo ========================================================
 echo [SUCCESS] ClipSync.apk built and signed successfully!
 echo Output: %cd%\ClipSync.apk
 echo ========================================================
-pause

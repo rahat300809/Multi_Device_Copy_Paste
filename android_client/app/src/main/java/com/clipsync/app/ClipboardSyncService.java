@@ -293,8 +293,14 @@ public class ClipboardSyncService extends Service implements ClipboardManager.On
                 if (service.clipboardManager != null) {
                     ClipData clip = ClipData.newPlainText("ClipSync", text);
                     service.clipboardManager.setPrimaryClip(clip);
-                    service.broadcastStatus("Received: " + (text.length() > 25 ? text.substring(0, 25) + "..." : text));
                 }
+                ClipboardAccessibilityService acc = ClipboardAccessibilityService.getInstance();
+                if (acc != null) {
+                    acc.setClipboardText(text);
+                }
+                String preview = text.length() > 30 ? text.substring(0, 30) + "..." : text;
+                service.broadcastStatus("Received: " + preview);
+                service.updateNotification("📋 Synced: " + preview);
             } catch (Exception ignored) {}
         }
     }

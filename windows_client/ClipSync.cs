@@ -206,16 +206,7 @@ namespace ClipSync
         {
             if (isPaused) return;
 
-            string text = null;
-            try
-            {
-                if (Clipboard.ContainsText())
-                {
-                    text = Clipboard.GetText();
-                }
-            }
-            catch { return; }
-
+            string text = SafeGetClipboardText();
             if (string.IsNullOrEmpty(text)) return;
 
             string hash = ComputeSha256(text);
@@ -223,6 +214,52 @@ namespace ClipSync
 
             lastHash = hash;
             BroadcastClipboard(text);
+        }
+
+        private string SafeGetClipboardText()
+        {
+            for (int i = 0; i < 5; i++)
+            {
+                try
+                {
+                    if (Clipboard.ContainsText())
+                    {
+                        return Clipboard.GetText();
+                    }
+                    return null;
+                }
+                catch (ExternalException)
+                {
+                    Thread.Sleep(40);
+                }
+                catch
+                {
+                    break;
+                }
+            }
+            return null;
+        }
+
+        private void SafeSetClipboardText(string text)
+        {
+            Thread staThread = new Thread(() => {
+                for (int i = 0; i < 5; i++)
+                {
+                    try
+                    {
+                        Clipboard.SetText(text);
+                        break;
+                    }
+                    catch (ExternalException)
+                    {
+                        Thread.Sleep(40);
+                    }
+                    catch { break; }
+                }
+            });
+            staThread.SetApartmentState(ApartmentState.STA);
+            staThread.Start();
+            staThread.Join(1200);
         }
 
         private async void BroadcastClipboard(string text)
@@ -310,17 +347,18 @@ namespace ClipSync
             string data = ExtractJsonData(json);
             if (!string.IsNullOrEmpty(data))
             {
-                lastHash = ComputeSha256(data);
-                Thread staThread = new Thread(() => {
-                    try
-                    {
-                        Clipboard.SetText(data);
-                    }
-                    catch { }
-                });
-                staThread.SetApartmentState(ApartmentState.STA);
-                staThread.Start();
-                staThread.Join(1000);
+                string hash = ComputeSha256(data);
+                if (hash == lastHash) return;
+                lastHash = hash;
+
+                SafeSetClipboardText(data);
+
+                try
+                {
+                    string preview = data.Length > 40 ? data.Substring(0, 40) + "..." : data;
+                    trayIcon.ShowBalloonTip(1500, "ClipSync", "📋 Synced: " + preview, ToolTipIcon.Info);
+                }
+                catch { }
             }
         }
 
@@ -398,9 +436,18 @@ namespace ClipSync
         [STAThread]
         static void Main()
         {
-            Application.EnableVisualStyles();
-            Application.SetCompatibleTextRenderingDefault(false);
-            Application.Run(new ClipSyncContext());
+            bool createdNew;
+            using (Mutex mutex = new Mutex(true, "ClipSyncSingleInstanceMutex_rahat300809", out createdNew))
+            {
+                if (!createdNew)
+                {
+                    MessageBox.Show("ClipSync is already running in your System Tray (near clock).", "ClipSync", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return;
+                }
+                Application.EnableVisualStyles();
+                Application.SetCompatibleTextRenderingDefault(false);
+                Application.Run(new ClipSyncContext());
+            }
         }
     }
 }

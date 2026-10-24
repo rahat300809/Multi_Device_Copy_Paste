@@ -41,6 +41,13 @@ public class MainActivity extends Activity implements View.OnClickListener {
         initViews();
         loadSavedSettings();
 
+        // Android 13+ Notification permission
+        if (Build.VERSION.SDK_INT >= 33) {
+            if (checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                requestPermissions(new String[]{android.Manifest.permission.POST_NOTIFICATIONS}, 1001);
+            }
+        }
+
         statusReceiver = new StatusReceiver(this);
         IntentFilter filter = new IntentFilter(ClipboardSyncService.ACTION_STATUS_UPDATE);
         if (Build.VERSION.SDK_INT >= 33) {
@@ -48,6 +55,39 @@ public class MainActivity extends Activity implements View.OnClickListener {
         } else {
             registerReceiver(statusReceiver, filter);
         }
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        updateAccessibilityButtonState();
+    }
+
+    private void updateAccessibilityButtonState() {
+        Button btn = (Button) findViewById(R.id.btnAccessibility);
+        if (btn != null) {
+            boolean enabled = isAccessibilityEnabled();
+            if (enabled) {
+                btn.setText("✅ Accessibility Active");
+            } else {
+                btn.setText("⚠️ Enable Accessibility (Required)");
+            }
+        }
+    }
+
+    private boolean isAccessibilityEnabled() {
+        int accessibilityEnabled = 0;
+        final String service = getPackageName() + "/" + ClipboardAccessibilityService.class.getName();
+        try {
+            accessibilityEnabled = Settings.Secure.getInt(getContentResolver(), Settings.Secure.ACCESSIBILITY_ENABLED);
+        } catch (Settings.SettingNotFoundException ignored) {}
+        if (accessibilityEnabled == 1) {
+            String settingValue = Settings.Secure.getString(getContentResolver(), Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES);
+            if (settingValue != null) {
+                return settingValue.contains(service) || settingValue.contains("ClipboardAccessibilityService");
+            }
+        }
+        return false;
     }
 
     private void initViews() {

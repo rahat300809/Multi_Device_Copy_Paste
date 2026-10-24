@@ -25,7 +25,7 @@ public class AppPreferences {
     }
 
     public String getServerUrl() {
-        return prefs.getString(KEY_SERVER_URL, "ws://192.168.1.100:8765/ws");
+        return prefs.getString(KEY_SERVER_URL, "ws://192.168.0.114:8765/ws");
     }
 
     public void setServerUrl(String url) {
