@@ -99,6 +99,8 @@ make_png(48, 48, launcher_pixel, os.path.join(res_dir, "mipmap-mdpi", "ic_launch
 make_png(72, 72, launcher_pixel, os.path.join(res_dir, "mipmap-hdpi", "ic_launcher.png"))
 make_png(96, 96, launcher_pixel, os.path.join(res_dir, "mipmap-xhdpi", "ic_launcher.png"))
 make_png(144, 144, launcher_pixel, os.path.join(res_dir, "mipmap-xxhdpi", "ic_launcher.png"))
+make_png(192, 192, launcher_pixel, os.path.join(res_dir, "mipmap-xxxhdpi", "ic_launcher.png"))
+make_png(96, 96, launcher_pixel, os.path.join(res_dir, "mipmap", "ic_launcher.png"))
 make_png(96, 96, launcher_pixel, os.path.join(res_dir, "drawable", "ic_launcher.png"))
 
 # Generate notification icon in res/drawable

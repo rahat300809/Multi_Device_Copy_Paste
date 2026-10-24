@@ -105,6 +105,7 @@ public class ClipboardSyncService extends Service implements ClipboardManager.On
         super.onCreate();
         sInstance = this;
         try {
+            createNotificationChannel();
             preferences = new AppPreferences(this);
             clipboardManager = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
             mainHandler = new Handler(Looper.getMainLooper());
@@ -597,9 +598,18 @@ public class ClipboardSyncService extends Service implements ClipboardManager.On
 
     private void updateNotification(String text) {
         try {
+            if (Build.VERSION.SDK_INT >= 33) {
+                if (checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                    return;
+                }
+            }
+            createNotificationChannel();
             NotificationManager manager = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
             if (manager != null) {
-                manager.notify(NOTIF_ID, buildNotification(text));
+                Notification notif = buildNotification(text);
+                if (notif != null) {
+                    manager.notify(NOTIF_ID, notif);
+                }
             }
         } catch (Throwable ignored) {}
     }

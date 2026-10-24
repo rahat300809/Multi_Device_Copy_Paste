@@ -56,10 +56,12 @@ for f in os.listdir(src_dir):
     if f.endswith(".java"):
         java_files.append(os.path.join(src_dir, f))
 
+RT_JAR = r"C:\Program Files\Eclipse Adoptium\jre-8.0.504.1-hotspot\lib\rt.jar"
 lib_jar = os.path.join(ANDROID_DIR, "libs", "Java-WebSocket-1.5.6.jar")
 cp = f"{PLATFORM};{lib_jar}"
 cmd_javac = [
     JAVAC, "-g", "-encoding", "UTF-8", "-target", "8", "-source", "8",
+    "-bootclasspath", f"{RT_JAR};{PLATFORM}",
     "-cp", cp,
     "-d", os.path.join(BUILD_DIR, "bin")
 ] + java_files
