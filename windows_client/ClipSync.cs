@@ -854,37 +854,58 @@ namespace ClipSync
 
             try
             {
-                Process check = new Process();
-                check.StartInfo.FileName = "netsh";
-                check.StartInfo.Arguments = "advfirewall firewall show rule name=\"ClipSync Server\"";
-                check.StartInfo.CreateNoWindow = true;
-                check.StartInfo.UseShellExecute = false;
-                check.StartInfo.RedirectStandardOutput = true;
-                check.Start();
-                string output = check.StandardOutput.ReadToEnd();
-                check.WaitForExit();
+                string exePath = Application.ExecutablePath;
 
-                if (output.Contains("ClipSync Server"))
-                {
-                    File.WriteAllText(marker, "ok");
-                    return;
-                }
+                // 1. Allow the application executable for Private, Public, and Domain network profiles
+                RunFirewallCommand("advfirewall firewall delete rule name=\"ClipSync App\"");
+                RunFirewallCommand("advfirewall firewall add rule name=\"ClipSync App\" dir=in action=allow program=\"" + exePath + "\" profile=any enable=yes");
 
-                ProcessStartInfo psi = new ProcessStartInfo();
-                psi.FileName = "netsh";
-                psi.Arguments = "advfirewall firewall add rule name=\"ClipSync Server\" dir=in action=allow protocol=TCP localport=8765,8766";
-                psi.Verb = "runas";
-                psi.WindowStyle = ProcessWindowStyle.Hidden;
-                psi.UseShellExecute = true;
+                // 2. Open TCP 8765 (WebSocket Relay Server) for all network profiles
+                RunFirewallCommand("advfirewall firewall delete rule name=\"ClipSync Server\"");
+                RunFirewallCommand("advfirewall firewall add rule name=\"ClipSync Server\" dir=in action=allow protocol=TCP localport=8765 profile=any enable=yes");
 
-                Process p = Process.Start(psi);
-                p.WaitForExit();
-                if (p.ExitCode == 0)
-                {
-                    File.WriteAllText(marker, "ok");
-                }
+                // 3. Open UDP 8766 (LAN Auto-Discovery) for all network profiles
+                RunFirewallCommand("advfirewall firewall delete rule name=\"ClipSync Discovery\"");
+                RunFirewallCommand("advfirewall firewall add rule name=\"ClipSync Discovery\" dir=in action=allow protocol=UDP localport=8766 profile=any enable=yes");
+
+                File.WriteAllText(marker, "ok");
             }
             catch { }
+        }
+
+        private void RunFirewallCommand(string netshArgs)
+        {
+            try
+            {
+                ProcessStartInfo psi = new ProcessStartInfo();
+                psi.FileName = "netsh";
+                psi.Arguments = netshArgs;
+                psi.CreateNoWindow = true;
+                psi.UseShellExecute = false;
+                psi.WindowStyle = ProcessWindowStyle.Hidden;
+
+                using (Process p = Process.Start(psi))
+                {
+                    if (p != null) p.WaitForExit(4000);
+                }
+            }
+            catch
+            {
+                try
+                {
+                    ProcessStartInfo psi = new ProcessStartInfo();
+                    psi.FileName = "netsh";
+                    psi.Arguments = netshArgs;
+                    psi.Verb = "runas";
+                    psi.UseShellExecute = true;
+                    psi.WindowStyle = ProcessWindowStyle.Hidden;
+                    using (Process p = Process.Start(psi))
+                    {
+                        if (p != null) p.WaitForExit(4000);
+                    }
+                }
+                catch { }
+            }
         }
 
         private void LoadConfig()
