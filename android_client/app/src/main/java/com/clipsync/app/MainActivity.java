@@ -72,10 +72,26 @@ public class MainActivity extends Activity implements View.OnClickListener, andr
         }
     }
 
-    private static class AppCrashHandler implements Thread.UncaughtExceptionHandler {
+    private static class DeferredInitRunnable implements Runnable {
+        private final MainActivity act;
+        public DeferredInitRunnable(MainActivity act) { this.act = act; }
         @Override
-        public void uncaughtException(Thread thread, Throwable throwable) {
-            Log.e("ClipSyncCrash", "Uncaught exception in " + thread.getName(), throwable);
+        public void run() {
+            try {
+                act.syncServiceSwitchState();
+                act.loadCachedDiscoveredDevices();
+            } catch (Throwable ignored) {}
+        }
+    }
+
+    private static class DeferredSyncRunnable implements Runnable {
+        private final MainActivity act;
+        public DeferredSyncRunnable(MainActivity act) { this.act = act; }
+        @Override
+        public void run() {
+            try {
+                act.syncClipboardFromActivity();
+            } catch (Throwable ignored) {}
         }
     }
 
@@ -83,12 +99,11 @@ public class MainActivity extends Activity implements View.OnClickListener, andr
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         try {
-            Thread.setDefaultUncaughtExceptionHandler(new AppCrashHandler());
-
             setContentView(R.layout.activity_main);
             mainHandler = new Handler(Looper.getMainLooper());
             preferences = new AppPreferences(this);
             initViews();
+            loadSavedSettings();
 
             if (Build.VERSION.SDK_INT >= 33) {
                 try {
@@ -97,8 +112,6 @@ public class MainActivity extends Activity implements View.OnClickListener, andr
                     }
                 } catch (Throwable ignored) {}
             }
-
-            loadSavedSettings();
 
             try {
                 statusReceiver = new StatusReceiver(this);
@@ -116,6 +129,9 @@ public class MainActivity extends Activity implements View.OnClickListener, andr
             } catch (Throwable t) {
                 Log.e("MainActivity", "Error registering receiver", t);
             }
+
+            // Defer background service start by 300ms so UI paints immediately without freezing
+            mainHandler.postDelayed(new DeferredInitRunnable(this), 300);
         } catch (Throwable t) {
             Log.e("MainActivity", "Error in onCreate", t);
         }
@@ -130,7 +146,7 @@ public class MainActivity extends Activity implements View.OnClickListener, andr
         setIntent(intent);
         try {
             if (intent != null && ClipboardSyncService.ACTION_TRIGGER_SYNC.equals(intent.getAction())) {
-                autoSyncClipboardOnResume();
+                mainHandler.postDelayed(new DeferredSyncRunnable(this), 200);
             }
         } catch (Throwable ignored) {}
     }
@@ -141,31 +157,35 @@ public class MainActivity extends Activity implements View.OnClickListener, andr
         try {
             syncServiceSwitchState();
             loadCachedDiscoveredDevices();
-            autoSyncClipboardOnResume();
-        } catch (Throwable ignored) {}
-    }
-
-    private void autoSyncClipboardOnResume() {
-        try {
-            syncClipboardFromActivity();
         } catch (Throwable ignored) {}
     }
 
     public void syncClipboardFromActivity() {
         try {
             android.content.ClipboardManager cm = (android.content.ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
-            if (cm != null && cm.hasPrimaryClip()) {
-                android.content.ClipData clip = cm.getPrimaryClip();
-                if (clip != null && clip.getItemCount() > 0) {
-                    CharSequence cs = clip.getItemAt(0).getText();
-                    if (cs != null && cs.length() > 0) {
-                        String text = cs.toString();
-                        ClipboardSyncService service = ClipboardSyncService.getInstance();
-                        if (service != null) {
-                            service.sendToRemote(text);
-                            Toast.makeText(this, "📋 Synced to PC: " + (text.length() > 25 ? text.substring(0, 25) + "..." : text), Toast.LENGTH_SHORT).show();
+            if (cm == null || !cm.hasPrimaryClip()) {
+                Toast.makeText(this, "Clipboard is empty. Copy some text first!", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            android.content.ClipData clip = cm.getPrimaryClip();
+            if (clip != null && clip.getItemCount() > 0) {
+                CharSequence cs = clip.getItemAt(0).getText();
+                if (cs != null && cs.length() > 0) {
+                    String text = cs.toString();
+                    ClipboardSyncService service = ClipboardSyncService.getInstance();
+                    if (service != null) {
+                        service.sendToRemote(text);
+                        String preview = text.length() > 25 ? text.substring(0, 25) + "..." : text;
+                        Toast.makeText(this, "📋 Synced to PC: " + preview, Toast.LENGTH_SHORT).show();
+                        if (tvLatestClipboard != null) {
+                            tvLatestClipboard.setText(text);
                         }
+                    } else {
+                        Toast.makeText(this, "Starting service... please try again", Toast.LENGTH_SHORT).show();
+                        startSyncService();
                     }
+                } else {
+                    Toast.makeText(this, "Clipboard is empty or contains non-text", Toast.LENGTH_SHORT).show();
                 }
             }
         } catch (Throwable t) {
@@ -541,17 +561,30 @@ public class MainActivity extends Activity implements View.OnClickListener, andr
     }
 
     private void loadSavedSettings() {
-        String mode = preferences.getMode();
-        if ("firebase".equalsIgnoreCase(mode)) {
-            rbFirebase.setChecked(true);
-        } else {
-            rbWebSocket.setChecked(true);
+        try {
+            String mode = preferences != null ? preferences.getMode() : "websocket";
+            if ("firebase".equalsIgnoreCase(mode)) {
+                if (rbFirebase != null) rbFirebase.setChecked(true);
+            } else {
+                if (rbWebSocket != null) rbWebSocket.setChecked(true);
+            }
+
+            if (etServerUrl != null && preferences != null) etServerUrl.setText(preferences.getServerUrl());
+            if (etDeviceName != null && preferences != null) etDeviceName.setText(preferences.getDeviceName());
+
+            boolean shouldBeActive = preferences != null && preferences.isServiceActive();
+            if (switchService != null) {
+                switchService.setOnCheckedChangeListener(null);
+                switchService.setChecked(shouldBeActive);
+                switchService.setOnCheckedChangeListener(new SwitchChangeListener(this));
+            }
+            if (tvConnectionStatus != null) {
+                tvConnectionStatus.setText(shouldBeActive ? "Status: Initializing..." : "Status: Stopped");
+                tvConnectionStatus.setTextColor(shouldBeActive ? 0xFF4ADE80 : 0xFF94A3B8);
+            }
+        } catch (Throwable t) {
+            Log.w("MainActivity", "loadSavedSettings: " + t.getMessage());
         }
-
-        etServerUrl.setText(preferences.getServerUrl());
-        etDeviceName.setText(preferences.getDeviceName());
-
-        syncServiceSwitchState();
     }
 
     private void saveCurrentSettings() {

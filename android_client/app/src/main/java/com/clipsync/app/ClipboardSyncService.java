@@ -114,20 +114,11 @@ public class ClipboardSyncService extends Service implements ClipboardManager.On
         return "Active (Scanning Wi-Fi for PC...)";
     }
 
-    private static class ServiceCrashHandler implements Thread.UncaughtExceptionHandler {
-        @Override
-        public void uncaughtException(Thread t, Throwable e) {
-            Log.e("ClipSyncCrash", "Uncaught exception in " + t.getName(), e);
-        }
-    }
-
     @Override
     public void onCreate() {
         super.onCreate();
         sInstance = this;
         try {
-            Thread.setDefaultUncaughtExceptionHandler(new ServiceCrashHandler());
-
             createNotificationChannel();
             preferences = new AppPreferences(this);
             clipboardManager = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
@@ -625,17 +616,15 @@ public class ClipboardSyncService extends Service implements ClipboardManager.On
         try {
             createNotificationChannel();
             Notification notif = buildNotification(text);
-            if (notif != null) {
-                if (Build.VERSION.SDK_INT >= 29) {
-                    try {
-                        startForeground(NOTIF_ID, notif, android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC);
-                    } catch (Throwable t) {
-                        startForeground(NOTIF_ID, notif);
-                    }
-                } else {
-                    startForeground(NOTIF_ID, notif);
-                }
+            if (notif == null) {
+                Notification.Builder fb = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O ?
+                        new Notification.Builder(this, CHANNEL_ID) : new Notification.Builder(this);
+                fb.setContentTitle("ClipSync Active")
+                  .setContentText(text)
+                  .setSmallIcon(R.drawable.ic_launcher);
+                notif = fb.build();
             }
+            startForeground(NOTIF_ID, notif);
         } catch (Throwable t) {
             Log.w(TAG, "safeStartForeground note: " + t.getMessage());
         }
