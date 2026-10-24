@@ -42,6 +42,8 @@ public class MainActivity extends Activity implements View.OnClickListener, andr
     private TextView tvScanStatus;
     private LinearLayout containerDevices;
     private Button btnScanDevices;
+    private EditText etDirectIp;
+    private Button btnDirectConnect;
 
     private BroadcastReceiver statusReceiver;
     private Handler mainHandler;
@@ -76,59 +78,24 @@ public class MainActivity extends Activity implements View.OnClickListener, andr
         } else {
             registerReceiver(statusReceiver, filter);
         }
-
-        checkFirstTimeSetup();
-    }
-
-    private void checkFirstTimeSetup() {
-        if (!isAccessibilityEnabled()) {
-            new android.app.AlertDialog.Builder(this)
-                    .setTitle("ClipSync Setup")
-                    .setMessage("To automatically sync copied text in the background across your devices, ClipSync requires Accessibility permission.\n\nTap 'Allow' to open Settings, then turn ClipSync ON.")
-                    .setPositiveButton("Allow", this)
-                    .setNegativeButton("Later", null)
-                    .show();
-        }
     }
 
     @Override
-    public void onClick(android.content.DialogInterface dialog, int which) {
-        try {
-            startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
-        } catch (Exception ignored) {}
-    }
+    public void onClick(android.content.DialogInterface dialog, int which) {}
 
     @Override
     protected void onResume() {
         super.onResume();
-        updateAccessibilityButtonState();
+        loadCachedDiscoveredDevices();
     }
 
-    private void updateAccessibilityButtonState() {
-        Button btn = (Button) findViewById(R.id.btnAccessibility);
-        if (btn != null) {
-            boolean enabled = isAccessibilityEnabled();
-            if (enabled) {
-                btn.setText("✅ Accessibility Active");
-            } else {
-                btn.setText("⚠️ Enable Accessibility (Required)");
+    private void loadCachedDiscoveredDevices() {
+        ClipboardSyncService service = ClipboardSyncService.getInstance();
+        if (service != null) {
+            for (ClipboardSyncService.DiscoveredDeviceItem item : service.getDiscoveredDevices()) {
+                onDeviceDiscovered(item.name, item.type, item.ip, item.port);
             }
         }
-    }
-
-    private boolean isAccessibilityEnabled() {
-        int accessibilityEnabled = 0;
-        final String service = getPackageName() + "/" + ClipboardAccessibilityService.class.getName();
-        try {
-            accessibilityEnabled = Settings.Secure.getInt(getContentResolver(), Settings.Secure.ACCESSIBILITY_ENABLED);
-        } catch (Settings.SettingNotFoundException ignored) {}
-        if (accessibilityEnabled == 1) {
-            String settingValue = Settings.Secure.getString(getContentResolver(), Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES);
-            if (settingValue != null) {
-                return settingValue.contains(service) || settingValue.contains("ClipboardAccessibilityService");
-            }
-        }
-        return false;
     }
 
     private void initViews() {
@@ -144,18 +111,19 @@ public class MainActivity extends Activity implements View.OnClickListener, andr
         tvScanStatus = (TextView) findViewById(R.id.tvScanStatus);
         containerDevices = (LinearLayout) findViewById(R.id.containerDevices);
         btnScanDevices = (Button) findViewById(R.id.btnScanDevices);
+        etDirectIp = (EditText) findViewById(R.id.etDirectIp);
+        btnDirectConnect = (Button) findViewById(R.id.btnDirectConnect);
 
         Button btnSaveConfig = (Button) findViewById(R.id.btnSaveConfig);
-        Button btnAccessibility = (Button) findViewById(R.id.btnAccessibility);
         Button btnBattery = (Button) findViewById(R.id.btnBattery);
         Button btnTestPush = (Button) findViewById(R.id.btnTestPush);
 
         switchService.setOnClickListener(this);
         btnSaveConfig.setOnClickListener(this);
-        btnAccessibility.setOnClickListener(this);
         btnBattery.setOnClickListener(this);
         btnTestPush.setOnClickListener(this);
         if (btnScanDevices != null) btnScanDevices.setOnClickListener(this);
+        if (btnDirectConnect != null) btnDirectConnect.setOnClickListener(this);
     }
 
     @Override
@@ -175,12 +143,21 @@ public class MainActivity extends Activity implements View.OnClickListener, andr
             if (switchService.isChecked()) {
                 startSyncService();
             }
-        } else if (id == R.id.btnAccessibility) {
-            Intent intent = new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS);
-            startActivity(intent);
-            Toast.makeText(this, "Find 'ClipSync' and turn it ON to allow background copy sync", Toast.LENGTH_LONG).show();
         } else if (id == R.id.btnBattery) {
             requestBatteryOptimizationExemption();
+        } else if (id == R.id.btnDirectConnect) {
+            String ip = etDirectIp != null ? etDirectIp.getText().toString().trim() : "";
+            if (ip.isEmpty()) {
+                Toast.makeText(this, "Please enter PC IP address (e.g. 192.168.0.108)", Toast.LENGTH_SHORT).show();
+            } else {
+                String targetWs = "ws://" + ip + ":8765/ws";
+                preferences.setServerUrl(targetWs);
+                preferences.setPairedDeviceName("PC (" + ip + ")");
+                etServerUrl.setText(targetWs);
+                saveCurrentSettings();
+                startSyncService();
+                Toast.makeText(this, "Connecting directly to " + ip + "...", Toast.LENGTH_SHORT).show();
+            }
         } else if (id == R.id.btnScanDevices) {
             discoveredKeys.clear();
             if (containerDevices != null) containerDevices.removeAllViews();

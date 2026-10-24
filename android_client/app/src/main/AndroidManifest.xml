@@ -20,6 +20,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
 
     <application
         android:allowBackup="true"
@@ -40,26 +41,12 @@
             </intent-filter>
         </activity>
 
-        <!-- Foreground Service that maintains WebSocket / Firebase sync -->
+        <!-- Foreground Service that maintains WebSocket / Firebase sync and LAN discovery -->
         <service
             android:name=".ClipboardSyncService"
             android:enabled="true"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
-
-        <!-- Accessibility Service to detect copy events in background (Android 10+) -->
-        <service
-            android:name=".ClipboardAccessibilityService"
-            android:enabled="true"
-            android:exported="true"
-            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
-            <intent-filter>
-                <action android:name="android.accessibilityservice.AccessibilityService" />
-            </intent-filter>
-            <meta-data
-                android:name="android.accessibilityservice"
-                android:resource="@xml/accessibility_service_config" />
-        </service>
 
         <!-- Boot Receiver for Auto Startup on phone reboot -->
         <receiver

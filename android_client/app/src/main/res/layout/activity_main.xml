@@ -103,6 +103,47 @@
                 android:layout_height="wrap_content"
                 android:layout_marginTop="8dp"
                 android:orientation="vertical" />
+
+            <!-- Manual / Direct Connect -->
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:text="Or Connect directly by IP (Wi-Fi / Tailscale):"
+                android:textColor="#94A3B8"
+                android:textSize="11sp" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:orientation="horizontal">
+
+                <EditText
+                    android:id="@+id/etDirectIp"
+                    android:layout_width="0dp"
+                    android:layout_height="40dp"
+                    android:layout_weight="1"
+                    android:background="@drawable/input_bg"
+                    android:hint="e.g. 192.168.0.108"
+                    android:textColorHint="#64748B"
+                    android:textColor="#F8FAFC"
+                    android:inputType="textUri"
+                    android:paddingStart="10dp"
+                    android:paddingEnd="10dp"
+                    android:textSize="13sp" />
+
+                <Button
+                    android:id="@+id/btnDirectConnect"
+                    android:layout_width="wrap_content"
+                    android:layout_height="40dp"
+                    android:layout_marginStart="8dp"
+                    android:background="@drawable/btn_primary"
+                    android:text="Connect"
+                    android:textAllCaps="false"
+                    android:textColor="#FFFFFF"
+                    android:textSize="12sp" />
+            </LinearLayout>
         </LinearLayout>
 
         <!-- Mode Card -->
@@ -199,7 +240,7 @@
                 android:textColor="#FFFFFF" />
         </LinearLayout>
 
-        <!-- Permissions Card -->
+        <!-- Background Optimization Card -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -211,7 +252,7 @@
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="BACKGROUND PERMISSIONS (ANDROID 10 - 15)"
+                android:text="BACKGROUND SYNC &amp; BATTERY"
                 android:textColor="#94A3B8"
                 android:textSize="11sp"
                 android:textStyle="bold" />
@@ -220,37 +261,19 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="6dp"
-                android:text="To allow auto-syncing copied text without opening this app, enable Accessibility and disable Battery Restrictions:"
+                android:text="ClipSync runs as an official foreground notification service. To prevent Android from sleeping the connection, disable battery restrictions:"
                 android:textColor="#94A3B8"
                 android:textSize="12sp" />
 
-            <LinearLayout
+            <Button
+                android:id="@+id/btnBattery"
                 android:layout_width="match_parent"
-                android:layout_height="wrap_content"
+                android:layout_height="40dp"
                 android:layout_marginTop="12dp"
-                android:orientation="horizontal">
-
-                <Button
-                    android:id="@+id/btnAccessibility"
-                    android:layout_width="0dp"
-                    android:layout_height="40dp"
-                    android:layout_weight="1"
-                    android:background="@drawable/btn_outline"
-                    android:text="Accessibility"
-                    android:textAllCaps="false"
-                    android:textColor="#3B82F6" />
-
-                <Button
-                    android:id="@+id/btnBattery"
-                    android:layout_width="0dp"
-                    android:layout_height="40dp"
-                    android:layout_marginStart="8dp"
-                    android:layout_weight="1"
-                    android:background="@drawable/btn_outline"
-                    android:text="Battery Saver"
-                    android:textAllCaps="false"
-                    android:textColor="#3B82F6" />
-            </LinearLayout>
+                android:background="@drawable/btn_outline"
+                android:text="⚡ Disable Battery Restrictions (Keep Alive)"
+                android:textAllCaps="false"
+                android:textColor="#3B82F6" />
         </LinearLayout>
 
         <!-- Latest Clipboard Card -->

@@ -14,6 +14,7 @@ using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+using System.Net.NetworkInformation;
 using Microsoft.Win32;
 
 namespace ClipSync
@@ -382,16 +383,31 @@ namespace ClipSync
 
             try
             {
-                using (UdpClient udp = new UdpClient())
+                IPEndPoint endpoint = new IPEndPoint(IPAddress.Parse(targetIp), DISCOVERY_PORT);
+                string msg = "CLIPSYNC_PAIR_REQ:" + myName + ":" + myIp + ":" + myPort;
+                byte[] data = Encoding.UTF8.GetBytes(msg);
+
+                foreach (NetworkInterface ni in NetworkInterface.GetAllNetworkInterfaces())
                 {
-                    udp.EnableBroadcast = true;
-                    IPEndPoint endpoint = new IPEndPoint(IPAddress.Parse(targetIp), DISCOVERY_PORT);
-                    string msg = "CLIPSYNC_PAIR_REQ:" + myName + ":" + myIp + ":" + myPort;
-                    byte[] data = Encoding.UTF8.GetBytes(msg);
-                    await udp.SendAsync(data, data.Length, endpoint);
+                    if (ni.OperationalStatus != OperationalStatus.Up || ni.NetworkInterfaceType == NetworkInterfaceType.Loopback)
+                        continue;
+                    foreach (UnicastIPAddressInformation uip in ni.GetIPProperties().UnicastAddresses)
+                    {
+                        if (uip.Address.AddressFamily == AddressFamily.InterNetwork)
+                        {
+                            try
+                            {
+                                using (UdpClient localUdp = new UdpClient(new IPEndPoint(uip.Address, 0)))
+                                {
+                                    await localUdp.SendAsync(data, data.Length, endpoint);
+                                }
+                            }
+                            catch { }
+                        }
+                    }
                 }
 
-                Task timeoutTask = Task.Delay(30000);
+                Task timeoutTask = Task.Delay(25000);
                 Task completedTask = await Task.WhenAny(tcs.Task, timeoutTask);
                 if (completedTask == tcs.Task)
                 {
@@ -410,25 +426,85 @@ namespace ClipSync
             }
         }
 
+        private static List<IPAddress> GetBroadcastAddresses()
+        {
+            var list = new List<IPAddress>();
+            list.Add(IPAddress.Broadcast); // 255.255.255.255
+            try
+            {
+                foreach (NetworkInterface ni in NetworkInterface.GetAllNetworkInterfaces())
+                {
+                    if (ni.OperationalStatus != OperationalStatus.Up || ni.NetworkInterfaceType == NetworkInterfaceType.Loopback)
+                        continue;
+
+                    var ipProps = ni.GetIPProperties();
+                    foreach (UnicastIPAddressInformation uip in ipProps.UnicastAddresses)
+                    {
+                        if (uip.Address.AddressFamily == AddressFamily.InterNetwork && uip.IPv4Mask != null)
+                        {
+                            byte[] ipBytes = uip.Address.GetAddressBytes();
+                            byte[] maskBytes = uip.IPv4Mask.GetAddressBytes();
+                            byte[] broadcastBytes = new byte[4];
+                            for (int i = 0; i < 4; i++)
+                            {
+                                broadcastBytes[i] = (byte)(ipBytes[i] | ~maskBytes[i]);
+                            }
+                            IPAddress bcast = new IPAddress(broadcastBytes);
+                            if (!list.Contains(bcast)) list.Add(bcast);
+                        }
+                    }
+                }
+            }
+            catch { }
+            return list;
+        }
+
         public void StartBroadcasting(string myName, int myPort)
         {
             Task.Run(async () => {
-                using (UdpClient udp = new UdpClient())
+                while (!cts.IsCancellationRequested)
                 {
-                    udp.EnableBroadcast = true;
-                    IPEndPoint endpoint = new IPEndPoint(IPAddress.Broadcast, DISCOVERY_PORT);
-
-                    while (!cts.IsCancellationRequested)
+                    try
                     {
-                        try
+                        string msg = "CLIPSYNC_DEV:" + myName + ":windows:" + myPort;
+                        byte[] data = Encoding.UTF8.GetBytes(msg);
+
+                        foreach (NetworkInterface ni in NetworkInterface.GetAllNetworkInterfaces())
                         {
-                            string msg = "CLIPSYNC_DEV:" + myName + ":windows:" + myPort;
-                            byte[] data = Encoding.UTF8.GetBytes(msg);
-                            await udp.SendAsync(data, data.Length, endpoint);
+                            if (ni.OperationalStatus != OperationalStatus.Up || ni.NetworkInterfaceType == NetworkInterfaceType.Loopback)
+                                continue;
+
+                            var ipProps = ni.GetIPProperties();
+                            foreach (UnicastIPAddressInformation uip in ipProps.UnicastAddresses)
+                            {
+                                if (uip.Address.AddressFamily == AddressFamily.InterNetwork && uip.IPv4Mask != null)
+                                {
+                                    IPAddress localIp = uip.Address;
+                                    byte[] ipBytes = localIp.GetAddressBytes();
+                                    byte[] maskBytes = uip.IPv4Mask.GetAddressBytes();
+                                    byte[] broadcastBytes = new byte[4];
+                                    for (int i = 0; i < 4; i++)
+                                    {
+                                        broadcastBytes[i] = (byte)(ipBytes[i] | ~maskBytes[i]);
+                                    }
+                                    IPAddress subnetBcast = new IPAddress(broadcastBytes);
+
+                                    try
+                                    {
+                                        using (UdpClient localUdp = new UdpClient(new IPEndPoint(localIp, 0)))
+                                        {
+                                            localUdp.EnableBroadcast = true;
+                                            await localUdp.SendAsync(data, data.Length, new IPEndPoint(subnetBcast, DISCOVERY_PORT));
+                                            await localUdp.SendAsync(data, data.Length, new IPEndPoint(IPAddress.Broadcast, DISCOVERY_PORT));
+                                        }
+                                    }
+                                    catch { }
+                                }
+                            }
                         }
-                        catch { }
-                        await Task.Delay(2500);
                     }
+                    catch { }
+                    await Task.Delay(2500);
                 }
             });
         }
@@ -643,6 +719,71 @@ namespace ClipSync
             };
             btnRefresh.Click += (s, e) => RefreshDeviceList();
             this.Controls.Add(btnRefresh);
+
+            Label lblManual = new Label
+            {
+                Text = "Or Enter IP Directly (Wi-Fi / Tailscale):",
+                Font = new Font("Segoe UI", 8.5f, FontStyle.Bold),
+                ForeColor = Color.FromArgb(96, 165, 250),
+                Location = new Point(20, 435),
+                AutoSize = true
+            };
+            this.Controls.Add(lblManual);
+
+            TextBox txtManualIp = new TextBox
+            {
+                Location = new Point(20, 460),
+                Size = new Size(240, 32),
+                Font = new Font("Segoe UI", 10.5f),
+                ForeColor = Color.White,
+                BackColor = Color.FromArgb(30, 41, 59),
+                BorderStyle = BorderStyle.FixedSingle
+            };
+            this.Controls.Add(txtManualIp);
+
+            Button btnManualConnect = new Button
+            {
+                Text = "Direct Connect",
+                Location = new Point(280, 458),
+                Size = new Size(180, 32),
+                BackColor = Color.FromArgb(37, 99, 235),
+                ForeColor = Color.White,
+                FlatStyle = FlatStyle.Flat,
+                Font = new Font("Segoe UI", 9.5f, FontStyle.Bold)
+            };
+            btnManualConnect.Click += (s, e) => {
+                string ip = txtManualIp.Text.Trim();
+                if (string.IsNullOrEmpty(ip))
+                {
+                    MessageBox.Show("Please enter an IP address (e.g. 192.168.0.108)", "ClipSync", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+                DiscoveredDevice dev = new DiscoveredDevice { Name = "Device (" + ip + ")", DeviceType = "windows", IP = ip, Port = 8765 };
+                lblStatus.Text = "Connecting directly to " + ip + "...";
+                btnManualConnect.Enabled = false;
+                Task.Run(async () => {
+                    bool ok = await context.RequestPairingAndConnect(dev);
+                    if (this.IsHandleCreated)
+                    {
+                        this.BeginInvoke(new Action(() => {
+                            btnManualConnect.Enabled = true;
+                            if (ok)
+                            {
+                                MessageBox.Show("✅ Connected to " + ip + "!\nClipboard sync active.", "Connected", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                                this.Close();
+                            }
+                            else
+                            {
+                                MessageBox.Show("Connection to " + ip + " failed or timed out.", "Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                                lblStatus.Text = "Connection to " + ip + " failed.";
+                            }
+                        }));
+                    }
+                });
+            };
+            this.Controls.Add(btnManualConnect);
+
+            this.Size = new Size(500, 545);
         }
 
         private void RefreshDeviceList()
@@ -849,7 +990,7 @@ namespace ClipSync
 
         private void EnsureFirewallConfigured(bool userTriggered)
         {
-            string marker = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, ".firewall_ok");
+            string marker = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, ".firewall_ok_v2");
             if (!userTriggered && File.Exists(marker)) return;
 
             try

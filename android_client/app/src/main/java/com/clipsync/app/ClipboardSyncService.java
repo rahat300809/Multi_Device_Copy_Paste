@@ -18,6 +18,7 @@ import android.widget.Toast;
 
 import android.net.ConnectivityManager;
 import android.net.Network;
+import android.net.wifi.WifiManager;
 
 import org.json.JSONObject;
 
@@ -70,6 +71,28 @@ public class ClipboardSyncService extends Service implements ClipboardManager.On
     private DatagramSocket udpSocket;
     private boolean isDiscoveryRunning = false;
     private ConnectivityManager.NetworkCallback networkCallback;
+    private WifiManager.MulticastLock multicastLock;
+
+    public static class DiscoveredDeviceItem {
+        public final String name;
+        public final String type;
+        public final String ip;
+        public final String port;
+        public long lastSeen;
+        public DiscoveredDeviceItem(String name, String type, String ip, String port) {
+            this.name = name;
+            this.type = type;
+            this.ip = ip;
+            this.port = port;
+            this.lastSeen = System.currentTimeMillis();
+        }
+    }
+    private final java.util.concurrent.ConcurrentHashMap<String, DiscoveredDeviceItem> activeDiscoveredDevices =
+            new java.util.concurrent.ConcurrentHashMap<String, DiscoveredDeviceItem>();
+
+    public java.util.Collection<DiscoveredDeviceItem> getDiscoveredDevices() {
+        return activeDiscoveredDevices.values();
+    }
 
     public static synchronized ClipboardSyncService getInstance() {
         return sInstance;
@@ -352,10 +375,6 @@ public class ClipboardSyncService extends Service implements ClipboardManager.On
                     ClipData clip = ClipData.newPlainText("ClipSync", text);
                     service.clipboardManager.setPrimaryClip(clip);
                 }
-                ClipboardAccessibilityService acc = ClipboardAccessibilityService.getInstance();
-                if (acc != null) {
-                    acc.setClipboardText(text);
-                }
                 String preview = text.length() > 30 ? text.substring(0, 30) + "..." : text;
                 service.broadcastStatus("Received: " + preview);
                 service.updateNotification("📋 Synced: " + preview);
@@ -365,6 +384,7 @@ public class ClipboardSyncService extends Service implements ClipboardManager.On
 
     private void broadcastStatus(String status) {
         Intent intent = new Intent(ACTION_STATUS_UPDATE);
+        intent.setPackage(getPackageName());
         intent.putExtra(EXTRA_STATUS, status);
         sendBroadcast(intent);
     }
@@ -461,6 +481,15 @@ public class ClipboardSyncService extends Service implements ClipboardManager.On
     }
 
     private void startBackgroundDiscovery() {
+        try {
+            WifiManager wm = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+            if (wm != null) {
+                multicastLock = wm.createMulticastLock("ClipSyncMulticastLock");
+                multicastLock.setReferenceCounted(true);
+                multicastLock.acquire();
+            }
+        } catch (Exception ignored) {}
+
         isDiscoveryRunning = true;
         new Thread(new ServiceDiscoveryRunnable(this)).start();
         new Thread(new ServiceBroadcastLoopRunnable(this)).start();
@@ -497,7 +526,11 @@ public class ClipboardSyncService extends Service implements ClipboardManager.On
 
                             if (service.preferences.getDeviceName().equals(name)) continue;
 
+                            DiscoveredDeviceItem item = new DiscoveredDeviceItem(name, type, remoteIp, port);
+                            service.activeDiscoveredDevices.put(remoteIp + ":" + port, item);
+
                             Intent intent = new Intent(ACTION_DEVICE_DISCOVERED);
+                            intent.setPackage(service.getPackageName());
                             intent.putExtra(EXTRA_DEV_NAME, name);
                             intent.putExtra(EXTRA_DEV_TYPE, type);
                             intent.putExtra(EXTRA_DEV_IP, remoteIp);
@@ -521,6 +554,7 @@ public class ClipboardSyncService extends Service implements ClipboardManager.On
                         String[] parts = msg.split(":");
                         if (parts.length >= 4) {
                             Intent intent = new Intent(ACTION_PAIR_REQUEST);
+                            intent.setPackage(service.getPackageName());
                             intent.putExtra(EXTRA_DEV_NAME, parts[1]);
                             intent.putExtra(EXTRA_DEV_IP, parts[2]);
                             intent.putExtra(EXTRA_DEV_PORT, parts[3]);
@@ -530,6 +564,7 @@ public class ClipboardSyncService extends Service implements ClipboardManager.On
                         String[] parts = msg.split(":");
                         if (parts.length >= 3) {
                             Intent intent = new Intent(ACTION_PAIR_RESPONSE);
+                            intent.setPackage(service.getPackageName());
                             intent.putExtra(EXTRA_PAIR_STATUS, parts[1]);
                             intent.putExtra(EXTRA_DEV_NAME, parts[2]);
                             service.sendBroadcast(intent);
@@ -547,7 +582,7 @@ public class ClipboardSyncService extends Service implements ClipboardManager.On
         public void run() {
             while (!service.isDestroyed && service.isDiscoveryRunning) {
                 service.sendDiscoveryBroadcast();
-                try { Thread.sleep(4000); } catch (InterruptedException ignored) {}
+                try { Thread.sleep(2500); } catch (InterruptedException ignored) {}
             }
         }
     }
@@ -557,12 +592,36 @@ public class ClipboardSyncService extends Service implements ClipboardManager.On
         public ServiceBroadcastRunnable(String name) { this.devName = name; }
         @Override
         public void run() {
-            try (DatagramSocket s = new DatagramSocket()) {
-                s.setBroadcast(true);
+            try {
                 String msg = "CLIPSYNC_DEV:" + devName + ":android:8765";
                 byte[] data = msg.getBytes("UTF-8");
-                DatagramPacket packet = new DatagramPacket(data, data.length, InetAddress.getByName("255.255.255.255"), 8766);
-                s.send(packet);
+
+                java.util.Set<InetAddress> broadcastTargets = new java.util.HashSet<InetAddress>();
+                try {
+                    broadcastTargets.add(InetAddress.getByName("255.255.255.255"));
+                } catch (Exception ignored) {}
+
+                try {
+                    java.util.Enumeration<java.net.NetworkInterface> interfaces = java.net.NetworkInterface.getNetworkInterfaces();
+                    while (interfaces.hasMoreElements()) {
+                        java.net.NetworkInterface ni = interfaces.nextElement();
+                        if (!ni.isUp() || ni.isLoopback()) continue;
+                        for (java.net.InterfaceAddress ia : ni.getInterfaceAddresses()) {
+                            InetAddress bcast = ia.getBroadcast();
+                            if (bcast != null) {
+                                broadcastTargets.add(bcast);
+                            }
+                        }
+                    }
+                } catch (Exception ignored) {}
+
+                for (InetAddress target : broadcastTargets) {
+                    try (DatagramSocket s = new DatagramSocket()) {
+                        s.setBroadcast(true);
+                        DatagramPacket packet = new DatagramPacket(data, data.length, target, 8766);
+                        s.send(packet);
+                    } catch (Exception ignored) {}
+                }
             } catch (Exception ignored) {}
         }
     }
@@ -571,6 +630,10 @@ public class ClipboardSyncService extends Service implements ClipboardManager.On
     public void onDestroy() {
         isDestroyed = true;
         isDiscoveryRunning = false;
+        if (multicastLock != null && multicastLock.isHeld()) {
+            try { multicastLock.release(); } catch (Exception ignored) {}
+            multicastLock = null;
+        }
         if (udpSocket != null) {
             try { udpSocket.close(); } catch (Exception ignored) {}
         }
