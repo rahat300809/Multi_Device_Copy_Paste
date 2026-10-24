@@ -68,6 +68,7 @@ public class ClipboardSyncService extends Service implements ClipboardManager.On
     private Thread firebaseThread;
 
     private String lastContentHash = "";
+    private long lastHashTime = 0;
     private boolean isDestroyed = false;
 
     private DatagramSocket udpSocket;
@@ -212,15 +213,21 @@ public class ClipboardSyncService extends Service implements ClipboardManager.On
     @Override
     public void onPrimaryClipChanged() {
         try {
-            if (clipboardManager == null || !clipboardManager.hasPrimaryClip()) return;
-            ClipData clip = clipboardManager.getPrimaryClip();
-            if (clip != null && clip.getItemCount() > 0) {
-                CharSequence text = clip.getItemAt(0).getText();
-                if (text != null && text.length() > 0) {
-                    String str = text.toString();
-                    String hash = sha256(str);
-                    if (!hash.equals(lastContentHash)) {
-                        sendToRemote(str);
+            if (clipboardManager == null) {
+                clipboardManager = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+            }
+            if (clipboardManager != null && clipboardManager.hasPrimaryClip()) {
+                ClipData clip = clipboardManager.getPrimaryClip();
+                if (clip != null && clip.getItemCount() > 0) {
+                    CharSequence text = clip.getItemAt(0).getText();
+                    if (text != null && text.length() > 0) {
+                        String str = text.toString();
+                        String hash = sha256(str);
+                        long now = System.currentTimeMillis();
+                        if (!hash.equals(lastContentHash) || (now - lastHashTime > 3000)) {
+                            sendToRemote(str);
+                            showToast("📋 Synced to PC: " + (str.length() > 25 ? str.substring(0, 25) + "..." : str));
+                        }
                     }
                 }
             }
@@ -308,7 +315,13 @@ public class ClipboardSyncService extends Service implements ClipboardManager.On
     }
 
     private void showToast(String msg) {
-        mainHandler.post(new ShowToastRunnable(getApplicationContext(), msg));
+        try {
+            if (mainHandler != null) {
+                mainHandler.post(new ShowToastRunnable(getApplicationContext(), msg));
+            } else {
+                new Handler(Looper.getMainLooper()).post(new ShowToastRunnable(getApplicationContext(), msg));
+            }
+        } catch (Throwable ignored) {}
     }
 
     private static class ShowToastRunnable implements Runnable {
@@ -397,12 +410,13 @@ public class ClipboardSyncService extends Service implements ClipboardManager.On
     public synchronized void sendToRemote(String text) {
         if (text == null || text.isEmpty()) return;
         lastContentHash = sha256(text);
+        lastHashTime = System.currentTimeMillis();
 
         // 1. Instant UDP direct sync (< 5ms)
         sendUdpClipboardPacket(text, lastContentHash);
 
         // 2. Reliable WebSocket delivery
-        String mode = preferences.getMode();
+        String mode = preferences != null ? preferences.getMode() : "websocket";
         if ("websocket".equalsIgnoreCase(mode)) {
             if (webSocketClient != null && webSocketClient.isOpen()) {
                 try {
@@ -414,7 +428,7 @@ public class ClipboardSyncService extends Service implements ClipboardManager.On
                     obj.put("timestamp", System.currentTimeMillis() / 1000);
                     webSocketClient.send(obj.toString());
                     pendingOutboundText = null;
-                } catch (Exception ignored) {
+                } catch (Throwable ignored) {
                     pendingOutboundText = text;
                 }
             } else {
@@ -437,10 +451,12 @@ public class ClipboardSyncService extends Service implements ClipboardManager.On
             byte[] data = msg.getBytes("UTF-8");
 
             java.util.Set<String> targetIps = new java.util.HashSet<String>();
+            targetIps.add("255.255.255.255");
+
             for (DiscoveredDeviceItem d : activeDiscoveredDevices.values()) {
-                targetIps.add(d.ip);
+                if (d.ip != null && !d.ip.isEmpty()) targetIps.add(d.ip);
             }
-            String currentUrl = preferences.getServerUrl();
+            String currentUrl = preferences != null ? preferences.getServerUrl() : "";
             if (currentUrl != null && currentUrl.contains("//")) {
                 String host = currentUrl.substring(currentUrl.indexOf("//") + 2);
                 if (host.contains(":")) host = host.substring(0, host.indexOf(":"));
@@ -516,7 +532,12 @@ public class ClipboardSyncService extends Service implements ClipboardManager.On
 
     private void setLocalClipboard(String text) {
         lastContentHash = sha256(text);
-        mainHandler.post(new SetClipboardRunnable(this, text));
+        lastHashTime = System.currentTimeMillis();
+        if (mainHandler != null) {
+            mainHandler.post(new SetClipboardRunnable(this, text));
+        } else {
+            new Handler(Looper.getMainLooper()).post(new SetClipboardRunnable(this, text));
+        }
     }
 
     private static class SetClipboardRunnable implements Runnable {
@@ -531,6 +552,9 @@ public class ClipboardSyncService extends Service implements ClipboardManager.On
         @Override
         public void run() {
             try {
+                if (service.clipboardManager == null) {
+                    service.clipboardManager = (ClipboardManager) service.getSystemService(Context.CLIPBOARD_SERVICE);
+                }
                 if (service.clipboardManager != null) {
                     ClipData clip = ClipData.newPlainText("ClipSync", text);
                     service.clipboardManager.setPrimaryClip(clip);
@@ -538,7 +562,8 @@ public class ClipboardSyncService extends Service implements ClipboardManager.On
                 String preview = text.length() > 30 ? text.substring(0, 30) + "..." : text;
                 service.broadcastStatus("Received: " + preview);
                 service.updateNotification("📋 Synced: " + preview);
-            } catch (Exception ignored) {}
+                service.showToast("📋 Copied from PC: " + preview);
+            } catch (Throwable ignored) {}
         }
     }
 
@@ -617,6 +642,16 @@ public class ClipboardSyncService extends Service implements ClipboardManager.On
             if (pendingIntent != null) {
                 builder.setContentIntent(pendingIntent);
             }
+
+            try {
+                Intent syncIntent = new Intent(this, MainActivity.class);
+                syncIntent.setAction(ACTION_TRIGGER_SYNC);
+                PendingIntent pSync = PendingIntent.getActivity(
+                        this, 2, syncIntent,
+                        Build.VERSION.SDK_INT >= 23 ? (PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE) : PendingIntent.FLAG_UPDATE_CURRENT
+                );
+                builder.addAction(iconRes, "📋 Sync Clipboard Now", pSync);
+            } catch (Throwable ignored) {}
 
             return builder.build();
         } catch (Throwable t) {
@@ -745,7 +780,9 @@ public class ClipboardSyncService extends Service implements ClipboardManager.On
 
                                 if (!isConnected || !newWs.equalsIgnoreCase(currentWs)) {
                                     service.preferences.setServerUrl(newWs);
-                                    service.mainHandler.post(new ReconnectRunnable(service));
+                                    if (service.mainHandler != null) {
+                                        service.mainHandler.post(new ReconnectRunnable(service));
+                                    }
                                 }
                             }
                         }

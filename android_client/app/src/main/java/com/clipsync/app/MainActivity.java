@@ -50,6 +50,7 @@ public class MainActivity extends Activity implements View.OnClickListener, andr
     private BroadcastReceiver statusReceiver;
     private Handler mainHandler;
     private final Set<String> discoveredKeys = new HashSet<String>();
+    private android.app.AlertDialog activePairDialog;
 
     private static class SwitchChangeListener implements CompoundButton.OnCheckedChangeListener {
         private final MainActivity act;
@@ -113,6 +114,17 @@ public class MainActivity extends Activity implements View.OnClickListener, andr
 
     @Override
     public void onClick(android.content.DialogInterface dialog, int which) {}
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        try {
+            if (intent != null && ClipboardSyncService.ACTION_TRIGGER_SYNC.equals(intent.getAction())) {
+                autoSyncClipboardOnResume();
+            }
+        } catch (Throwable ignored) {}
+    }
 
     @Override
     protected void onResume() {
@@ -210,10 +222,8 @@ public class MainActivity extends Activity implements View.OnClickListener, andr
             } else if (id == R.id.btnTestPush) {
                 ClipboardSyncService service = ClipboardSyncService.getInstance();
                 if (service != null) {
-                    String testMsg = "Hello from Android (" + preferences.getDeviceName() + ") at " + new java.util.Date();
-                    service.sendToRemote(testMsg);
-                    if (tvLatestClipboard != null) tvLatestClipboard.setText(testMsg);
-                    Toast.makeText(this, "Sent test message to PC!", Toast.LENGTH_SHORT).show();
+                    service.syncCurrentClipboardNow();
+                    Toast.makeText(this, "📋 Reading & Syncing Clipboard to PC...", Toast.LENGTH_SHORT).show();
                 } else {
                     Toast.makeText(this, "Service not running. Please turn ON switch above.", Toast.LENGTH_SHORT).show();
                 }
@@ -277,14 +287,24 @@ public class MainActivity extends Activity implements View.OnClickListener, andr
 
         @Override
         public void run() {
-            if (act.isFinishing()) return;
-            new android.app.AlertDialog.Builder(act)
-                    .setTitle("ClipSync Connection Request")
-                    .setMessage("💻 Device: " + fromName + " (" + fromIp + ")\n\nwants to connect and sync clipboard with this phone.\n\nDo you want to ALLOW this device?")
-                    .setPositiveButton("ALLOW", new AllowPairClickListener(act, fromName, fromIp, fromPort))
-                    .setNegativeButton("DENY", new DenyPairClickListener(act, fromName, fromIp))
-                    .setCancelable(false)
-                    .show();
+            try {
+                if (act == null || act.isFinishing()) return;
+                if (Build.VERSION.SDK_INT >= 17 && act.isDestroyed()) return;
+
+                if (act.activePairDialog != null && act.activePairDialog.isShowing()) {
+                    return; // prevent duplicate dialogs
+                }
+
+                act.activePairDialog = new android.app.AlertDialog.Builder(act)
+                        .setTitle("ClipSync Connection Request")
+                        .setMessage("💻 Device: " + fromName + " (" + fromIp + ")\n\nwants to connect and sync clipboard with this phone.\n\nDo you want to ALLOW this device?")
+                        .setPositiveButton("ALLOW", new AllowPairClickListener(act, fromName, fromIp, fromPort))
+                        .setNegativeButton("DENY", new DenyPairClickListener(act, fromName, fromIp))
+                        .setCancelable(false)
+                        .show();
+            } catch (Throwable t) {
+                Log.w("MainActivity", "Dialog show prevented: " + t.getMessage());
+            }
         }
     }
 
@@ -303,12 +323,17 @@ public class MainActivity extends Activity implements View.OnClickListener, andr
 
         @Override
         public void onClick(android.content.DialogInterface dialog, int which) {
-            String targetWs = "ws://" + fromIp + ":" + fromPort + "/ws";
-            act.etServerUrl.setText(targetWs);
-            act.saveCurrentSettings();
-            act.startSyncService();
-            act.sendUdpResponse(fromIp, "allow");
-            Toast.makeText(act, "✅ Connected to " + fromName + "! Clipboard sync active.", Toast.LENGTH_SHORT).show();
+            try {
+                String targetWs = "ws://" + fromIp + ":" + fromPort + "/ws";
+                act.preferences.setPairedDeviceName(fromName);
+                if (act.etServerUrl != null) act.etServerUrl.setText(targetWs);
+                act.saveCurrentSettings();
+                act.startSyncService();
+                act.sendUdpResponse(fromIp, "allow");
+                Toast.makeText(act, "✅ Connected to " + fromName + "! Clipboard sync active.", Toast.LENGTH_SHORT).show();
+            } catch (Throwable t) {
+                Log.e("MainActivity", "Error allowing pair: " + t.getMessage(), t);
+            }
         }
     }
 
@@ -325,8 +350,10 @@ public class MainActivity extends Activity implements View.OnClickListener, andr
 
         @Override
         public void onClick(android.content.DialogInterface dialog, int which) {
-            act.sendUdpResponse(fromIp, "deny");
-            Toast.makeText(act, "Declined connection from " + fromName, Toast.LENGTH_SHORT).show();
+            try {
+                act.sendUdpResponse(fromIp, "deny");
+                Toast.makeText(act, "Declined connection from " + fromName, Toast.LENGTH_SHORT).show();
+            } catch (Throwable ignored) {}
         }
     }
 
@@ -343,11 +370,15 @@ public class MainActivity extends Activity implements View.OnClickListener, andr
 
         @Override
         public void run() {
-            if ("allow".equalsIgnoreCase(status) || "accepted".equalsIgnoreCase(status)) {
-                Toast.makeText(act, "✅ " + fromName + " ALLOWED connection! Clipboard sync active.", Toast.LENGTH_LONG).show();
-            } else {
-                Toast.makeText(act, "❌ " + fromName + " DECLINED connection.", Toast.LENGTH_LONG).show();
-            }
+            try {
+                if (act == null || act.isFinishing()) return;
+                if (Build.VERSION.SDK_INT >= 17 && act.isDestroyed()) return;
+                if ("allow".equalsIgnoreCase(status) || "accepted".equalsIgnoreCase(status)) {
+                    Toast.makeText(act, "✅ " + fromName + " ALLOWED connection! Clipboard sync active.", Toast.LENGTH_LONG).show();
+                } else {
+                    Toast.makeText(act, "❌ " + fromName + " DECLINED connection.", Toast.LENGTH_LONG).show();
+                }
+            } catch (Throwable ignored) {}
         }
     }
 
@@ -368,30 +399,37 @@ public class MainActivity extends Activity implements View.OnClickListener, andr
 
         @Override
         public void run() {
-            String key = ip + ":" + port;
-            if (act.discoveredKeys.contains(key)) return;
-            act.discoveredKeys.add(key);
+            try {
+                if (act == null || act.isFinishing()) return;
+                if (Build.VERSION.SDK_INT >= 17 && act.isDestroyed()) return;
 
-            if (act.tvScanStatus != null) {
-                act.tvScanStatus.setText("Found " + act.discoveredKeys.size() + " device(s) on Wi-Fi (Tap to connect):");
-            }
+                String key = ip + ":" + port;
+                if (act.discoveredKeys.contains(key)) return;
+                act.discoveredKeys.add(key);
 
-            if (act.containerDevices != null) {
-                Button btn = new Button(act);
-                String icon = "android".equals(type) ? "📱 " : "💻 ";
-                btn.setText(icon + name + " (" + ip + ")\nTap to Connect & Sync");
-                btn.setTextColor(0xFFFFFFFF);
-                btn.setTextSize(13);
-                btn.setBackgroundResource(R.drawable.btn_outline);
-                btn.setPadding(20, 20, 20, 20);
+                if (act.tvScanStatus != null) {
+                    act.tvScanStatus.setText("Found " + act.discoveredKeys.size() + " device(s) on Wi-Fi (Tap to connect):");
+                }
 
-                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                        LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
-                lp.setMargins(0, 8, 0, 8);
-                btn.setLayoutParams(lp);
+                if (act.containerDevices != null) {
+                    Button btn = new Button(act);
+                    String icon = "android".equals(type) ? "📱 " : "💻 ";
+                    btn.setText(icon + name + " (" + ip + ")\nTap to Connect & Sync");
+                    btn.setTextColor(0xFFFFFFFF);
+                    btn.setTextSize(13);
+                    btn.setBackgroundResource(R.drawable.btn_outline);
+                    btn.setPadding(20, 20, 20, 20);
 
-                btn.setOnClickListener(new DeviceConnectClickListener(act, name, ip, port));
-                act.containerDevices.addView(btn);
+                    LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+                    lp.setMargins(0, 8, 0, 8);
+                    btn.setLayoutParams(lp);
+
+                    btn.setOnClickListener(new DeviceConnectClickListener(act, name, ip, port));
+                    act.containerDevices.addView(btn);
+                }
+            } catch (Throwable t) {
+                Log.w("MainActivity", "Error in AddDeviceViewRunnable: " + t.getMessage());
             }
         }
     }
@@ -411,12 +449,16 @@ public class MainActivity extends Activity implements View.OnClickListener, andr
 
         @Override
         public void onClick(View v) {
-            String targetWs = "ws://" + ip + ":" + port + "/ws";
-            act.preferences.setPairedDeviceName(name);
-            act.etServerUrl.setText(targetWs);
-            act.saveCurrentSettings();
-            act.startSyncService();
-            Toast.makeText(act, "Sending connection request to " + name + "...\nPlease click 'ALLOW' on " + name, Toast.LENGTH_LONG).show();
+            try {
+                String targetWs = "ws://" + ip + ":" + port + "/ws";
+                act.preferences.setPairedDeviceName(name);
+                if (act.etServerUrl != null) act.etServerUrl.setText(targetWs);
+                act.saveCurrentSettings();
+                act.startSyncService();
+                Toast.makeText(act, "Connecting to " + name + "...\nPlease click 'ALLOW' on " + name, Toast.LENGTH_LONG).show();
+            } catch (Throwable t) {
+                Log.e("MainActivity", "Error in DeviceConnectClickListener: " + t.getMessage(), t);
+            }
         }
     }
 

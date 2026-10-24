@@ -20,14 +20,16 @@ public class SyncWebSocketClient extends WebSocketClient {
     public void onOpen(ServerHandshake handshakedata) {
         Log.i(TAG, "WebSocket connected");
         if (service != null) {
-            service.onWebSocketOpen();
             try {
+                service.onWebSocketOpen();
                 JSONObject req = new JSONObject();
                 req.put("type", "pair_req");
                 req.put("from_name", service.getPreferences().getDeviceName());
                 req.put("from_ip", "android");
                 send(req.toString());
-            } catch (Exception ignored) {}
+            } catch (Throwable t) {
+                Log.w(TAG, "onOpen note: " + t.getMessage());
+            }
         }
     }
 
@@ -47,7 +49,9 @@ public class SyncWebSocketClient extends WebSocketClient {
                         service.onWebSocketClipboardReceived(data);
                     }
                 }
-            } catch (Exception ignored) {}
+            } catch (Throwable t) {
+                Log.w(TAG, "onMessage note: " + t.getMessage());
+            }
         }
     }
 
@@ -55,12 +59,16 @@ public class SyncWebSocketClient extends WebSocketClient {
     public void onClose(int code, String reason, boolean remote) {
         Log.w(TAG, "WebSocket closed: " + reason);
         if (service != null) {
-            service.onWebSocketClosed();
+            try {
+                service.onWebSocketClosed();
+            } catch (Throwable t) {
+                Log.w(TAG, "onClose note: " + t.getMessage());
+            }
         }
     }
 
     @Override
     public void onError(Exception ex) {
-        Log.e(TAG, "WebSocket error: " + ex);
+        Log.w(TAG, "WebSocket error: " + ex);
     }
 }
