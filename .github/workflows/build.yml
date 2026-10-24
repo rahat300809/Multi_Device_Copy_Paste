@@ -1,0 +1,66 @@
+name: Build ClipSync (APK & EXE)
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build-windows-exe:
+    name: Build Windows Standalone EXE
+    runs-on: windows-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Dependencies
+        run: |
+          cd windows_client
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Build Standalone EXE
+        run: |
+          cd windows_client
+          pyinstaller --onefile --noconsole --name "ClipSync" --clean client.py
+
+      - name: Upload ClipSync.exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: ClipSync-Windows-EXE
+          path: windows_client/dist/ClipSync.exe
+
+  build-android-apk:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Java JDK
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+
+      - name: Build APK with Gradle
+        run: |
+          cd android_client
+          chmod +x gradlew || gradle wrapper
+          ./gradlew assembleDebug --stacktrace
+
+      - name: Upload ClipSync.apk
+        uses: actions/upload-artifact@v4
+        with:
+          name: ClipSync-Android-APK
+          path: android_client/app/build/outputs/apk/debug/*.apk

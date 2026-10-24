@@ -1,0 +1,40 @@
+# Windows build artifacts
+windows_client/*.log
+*.log
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Android build artifacts
+android_client/build/
+android_client/app/build/
+*.class
+
+# Docker volumes
+server/data/
+
+# IDE
+.vscode/
+.idea/
+*.suo
+*.user
+*.ncrunch*
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Test / temp scripts
+test_*.py
+test_*.ps1
+kill_clipsync.ps1
+scratch/

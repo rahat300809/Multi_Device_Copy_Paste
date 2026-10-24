@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">ClipSync</string>
+    <string name="accessibility_description">Enables ClipSync to automatically detect when you copy text in any app, instantly syncing it to your PC or other devices in the background without needing to switch apps.</string>
+</resources>

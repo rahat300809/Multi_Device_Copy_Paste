@@ -1,0 +1,7 @@
+{
+  "server_url": "ws://127.0.0.1:8765/ws",
+  "device_name": "Windows Laptop",
+  "auth_token": "",
+  "auto_start": true,
+  "sync_notifications": true
+}

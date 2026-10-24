@@ -1,0 +1,23 @@
+version: '3.8'
+
+services:
+  clipsync-relay:
+    build: .
+    image: clipsync-relay:latest
+    container_name: clipsync-relay
+    restart: unless-stopped
+    ports:
+      - "8765:8765"
+    environment:
+      - PORT=8765
+      # Optional: Set an auth token if you want password-protected sync across devices
+      # - AUTH_TOKEN=my_super_secret_token
+      - MAX_HISTORY=50
+    # Minimal resource limits for ultra-lightweight execution
+    deploy:
+      resources:
+        limits:
+          cpus: '0.20'
+          memory: 64M
+        reservations:
+          memory: 16M
