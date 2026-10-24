@@ -72,10 +72,19 @@ public class MainActivity extends Activity implements View.OnClickListener, andr
         }
     }
 
+    private static class AppCrashHandler implements Thread.UncaughtExceptionHandler {
+        @Override
+        public void uncaughtException(Thread thread, Throwable throwable) {
+            Log.e("ClipSyncCrash", "Uncaught exception in " + thread.getName(), throwable);
+        }
+    }
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         try {
+            Thread.setDefaultUncaughtExceptionHandler(new AppCrashHandler());
+
             setContentView(R.layout.activity_main);
             mainHandler = new Handler(Looper.getMainLooper());
             preferences = new AppPreferences(this);
@@ -138,13 +147,30 @@ public class MainActivity extends Activity implements View.OnClickListener, andr
 
     private void autoSyncClipboardOnResume() {
         try {
-            if (preferences != null && preferences.isServiceActive()) {
-                ClipboardSyncService service = ClipboardSyncService.getInstance();
-                if (service != null) {
-                    service.syncCurrentClipboardNow();
+            syncClipboardFromActivity();
+        } catch (Throwable ignored) {}
+    }
+
+    public void syncClipboardFromActivity() {
+        try {
+            android.content.ClipboardManager cm = (android.content.ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+            if (cm != null && cm.hasPrimaryClip()) {
+                android.content.ClipData clip = cm.getPrimaryClip();
+                if (clip != null && clip.getItemCount() > 0) {
+                    CharSequence cs = clip.getItemAt(0).getText();
+                    if (cs != null && cs.length() > 0) {
+                        String text = cs.toString();
+                        ClipboardSyncService service = ClipboardSyncService.getInstance();
+                        if (service != null) {
+                            service.sendToRemote(text);
+                            Toast.makeText(this, "📋 Synced to PC: " + (text.length() > 25 ? text.substring(0, 25) + "..." : text), Toast.LENGTH_SHORT).show();
+                        }
+                    }
                 }
             }
-        } catch (Throwable ignored) {}
+        } catch (Throwable t) {
+            Log.w("MainActivity", "syncClipboardFromActivity: " + t.getMessage());
+        }
     }
 
     private void loadCachedDiscoveredDevices() {
@@ -222,8 +248,7 @@ public class MainActivity extends Activity implements View.OnClickListener, andr
             } else if (id == R.id.btnTestPush) {
                 ClipboardSyncService service = ClipboardSyncService.getInstance();
                 if (service != null) {
-                    service.syncCurrentClipboardNow();
-                    Toast.makeText(this, "📋 Reading & Syncing Clipboard to PC...", Toast.LENGTH_SHORT).show();
+                    syncClipboardFromActivity();
                 } else {
                     Toast.makeText(this, "Service not running. Please turn ON switch above.", Toast.LENGTH_SHORT).show();
                 }
