@@ -24,7 +24,7 @@ if not exist "build\gen" mkdir "build\gen"
 if not exist "build\bin" mkdir "build\bin"
 
 "%BUILD_TOOLS%\aapt2.exe" compile --dir app\src\main\res -o build\compiled_res.zip
-"%BUILD_TOOLS%\aapt2.exe" link -o build\base.apk -I "%PLATFORM%" --manifest app\src\main\AndroidManifest.xml --java build\gen build\compiled_res.zip --auto-add-overlay
+"%BUILD_TOOLS%\aapt2.exe" link -o build\base.apk -I "%PLATFORM%" --manifest app\src\main\AndroidManifest.xml --min-sdk-version 26 --target-sdk-version 34 --version-code 1 --version-name "1.0.0" --java build\gen build\compiled_res.zip --auto-add-overlay
 
 echo [*] Step 2: Compiling Java source files with javac...
 del /q build\bin\*.* 2>nul
@@ -38,11 +38,11 @@ cd build
 "%JAR%" -uf base.apk classes.dex
 "%BUILD_TOOLS%\zipalign.exe" -p -f 4 base.apk ClipSync-unaligned.apk
 
-if not exist "debug.keystore" (
-    "%KEYTOOL%" -genkey -v -keystore "debug.keystore" -storepass "android" -alias "androiddebugkey" -keypass "android" -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+if not exist "release.keystore" (
+    "%KEYTOOL%" -genkey -v -keystore "release.keystore" -storepass "clipsync123" -alias "clipsync" -keypass "clipsync123" -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=ClipSync, OU=Sync, O=ClipSync, C=US"
 )
 
-call "%BUILD_TOOLS%\apksigner.bat" sign --ks debug.keystore --ks-pass pass:android --key-pass pass:android --out ..\ClipSync.apk ClipSync-unaligned.apk
+call "%BUILD_TOOLS%\apksigner.bat" sign --ks release.keystore --ks-pass pass:clipsync123 --key-pass pass:clipsync123 --v1-signing-enabled true --v2-signing-enabled true --v3-signing-enabled true --out ..\ClipSync.apk ClipSync-unaligned.apk
 cd ..
 copy /y ClipSync.apk ..\ClipSync.apk >nul
 
