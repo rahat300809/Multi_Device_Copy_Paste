@@ -438,16 +438,19 @@ public class MainActivity extends Activity implements View.OnClickListener, andr
         etDeviceName.setText(preferences.getDeviceName());
 
         boolean active = preferences.isServiceActive();
-        switchService.setChecked(active);
-        if (active) {
+        if (switchService != null) {
+            switchService.setChecked(active);
+        }
+        if (active && (ClipboardSyncService.getInstance() == null)) {
             startSyncService();
         }
     }
 
     private void saveCurrentSettings() {
-        preferences.setMode(rbFirebase.isChecked() ? "firebase" : "websocket");
-        preferences.setServerUrl(etServerUrl.getText().toString().trim());
-        preferences.setDeviceName(etDeviceName.getText().toString().trim());
+        if (preferences == null) return;
+        preferences.setMode(rbFirebase != null && rbFirebase.isChecked() ? "firebase" : "websocket");
+        if (etServerUrl != null) preferences.setServerUrl(etServerUrl.getText().toString().trim());
+        if (etDeviceName != null) preferences.setDeviceName(etDeviceName.getText().toString().trim());
 
         ClipboardSyncService service = ClipboardSyncService.getInstance();
         if (service != null) {
@@ -458,16 +461,14 @@ public class MainActivity extends Activity implements View.OnClickListener, andr
     private void startSyncService() {
         try {
             Intent intent = new Intent(this, ClipboardSyncService.class);
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                try {
-                    startForegroundService(intent);
-                } catch (Throwable t) {
+            try {
+                startService(intent);
+            } catch (Throwable t) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                     try {
-                        startService(intent);
+                        startForegroundService(intent);
                     } catch (Throwable ignored) {}
                 }
-            } else {
-                startService(intent);
             }
             if (tvConnectionStatus != null) {
                 tvConnectionStatus.setText("Status: Service Running");
@@ -475,7 +476,22 @@ public class MainActivity extends Activity implements View.OnClickListener, andr
         } catch (Throwable t) {
             Log.e("MainActivity", "Failed to start sync service", t);
             if (tvConnectionStatus != null) {
-                tvConnectionStatus.setText("Status: Stopped (Permission required)");
+                tvConnectionStatus.setText("Status: Stopped");
+            }
+        }
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == 1001) {
+            if (grantResults != null && grantResults.length > 0 && grantResults[0] == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                ClipboardSyncService service = ClipboardSyncService.getInstance();
+                if (service != null) {
+                    service.promoteToForeground();
+                } else if (preferences != null && preferences.isServiceActive()) {
+                    startSyncService();
+                }
             }
         }
     }

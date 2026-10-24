@@ -544,65 +544,55 @@ public class ClipboardSyncService extends Service implements ClipboardManager.On
 
     private void safeStartForeground(String text) {
         try {
-            createNotificationChannel();
-            Notification notif = buildNotification(text);
-            if (Build.VERSION.SDK_INT >= 29) {
-                try {
-                    startForeground(NOTIF_ID, notif, 1); // 1 = FOREGROUND_SERVICE_TYPE_DATA_SYNC
+            if (Build.VERSION.SDK_INT >= 33) {
+                if (checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                    Log.w(TAG, "Notification permission not yet granted; running in standard background mode");
                     return;
-                } catch (Throwable t) {
-                    Log.w(TAG, "startForeground with type failed: " + t.getMessage());
                 }
             }
-            startForeground(NOTIF_ID, notif);
+            createNotificationChannel();
+            Notification notif = buildNotification(text);
+            if (notif != null) {
+                startForeground(NOTIF_ID, notif);
+            }
         } catch (Throwable t) {
-            Log.w(TAG, "safeStartForeground failed: " + t.getMessage());
+            Log.w(TAG, "safeStartForeground note: " + t.getMessage());
         }
     }
 
+    public void promoteToForeground() {
+        safeStartForeground("ClipSync Active (Background)");
+    }
+
     private Notification buildNotification(String text) {
-        PendingIntent pendingIntent = null;
         try {
             Intent notificationIntent = new Intent(this, MainActivity.class);
-            pendingIntent = PendingIntent.getActivity(
+            PendingIntent pendingIntent = PendingIntent.getActivity(
                     this, 0, notificationIntent,
                     Build.VERSION.SDK_INT >= 23 ? PendingIntent.FLAG_IMMUTABLE : 0
             );
-        } catch (Throwable ignored) {}
 
-        Notification.Builder builder;
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            builder = new Notification.Builder(this, CHANNEL_ID);
-        } else {
-            builder = new Notification.Builder(this);
+            Notification.Builder builder;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                builder = new Notification.Builder(this, CHANNEL_ID);
+            } else {
+                builder = new Notification.Builder(this);
+            }
+
+            builder.setContentTitle("ClipSync Active")
+                    .setContentText(text)
+                    .setSmallIcon(R.drawable.ic_stat_sync)
+                    .setOngoing(true);
+
+            if (pendingIntent != null) {
+                builder.setContentIntent(pendingIntent);
+            }
+
+            return builder.build();
+        } catch (Throwable t) {
+            Log.w(TAG, "buildNotification note: " + t.getMessage());
+            return null;
         }
-
-        builder.setContentTitle("ClipSync Active")
-                .setContentText(text)
-                .setSmallIcon(R.drawable.ic_stat_sync)
-                .setOngoing(true);
-
-        if (pendingIntent != null) {
-            builder.setContentIntent(pendingIntent);
-        }
-
-        try {
-            Intent syncIntent = new Intent(this, ClipboardSyncService.class);
-            syncIntent.setAction(ACTION_TRIGGER_SYNC);
-            PendingIntent syncPendingIntent = PendingIntent.getService(
-                    this, 2, syncIntent,
-                    Build.VERSION.SDK_INT >= 23 ? PendingIntent.FLAG_IMMUTABLE : 0
-            );
-
-            Notification.Action syncAction = new Notification.Action.Builder(
-                    R.drawable.ic_stat_sync,
-                    "📋 SYNC TO PC",
-                    syncPendingIntent
-            ).build();
-            builder.addAction(syncAction);
-        } catch (Throwable ignored) {}
-
-        return builder.build();
     }
 
     private void updateNotification(String text) {
