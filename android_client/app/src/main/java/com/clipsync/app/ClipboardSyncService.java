@@ -75,6 +75,7 @@ public class ClipboardSyncService extends Service implements ClipboardManager.On
     private boolean isDiscoveryRunning = false;
     private ConnectivityManager.NetworkCallback networkCallback;
     private WifiManager.MulticastLock multicastLock;
+    private android.os.PowerManager.WakeLock wakeLock;
 
     public static class DiscoveredDeviceItem {
         public final String name;
@@ -124,6 +125,17 @@ public class ClipboardSyncService extends Service implements ClipboardManager.On
             mainHandler = new Handler(Looper.getMainLooper());
 
             safeStartForeground("Starting ClipSync...");
+
+            try {
+                android.os.PowerManager pm = (android.os.PowerManager) getSystemService(Context.POWER_SERVICE);
+                if (pm != null) {
+                    wakeLock = pm.newWakeLock(android.os.PowerManager.PARTIAL_WAKE_LOCK, "ClipSync::ServiceWakeLock");
+                    wakeLock.setReferenceCounted(false);
+                    wakeLock.acquire();
+                }
+            } catch (Throwable t) {
+                Log.w(TAG, "Failed to acquire WakeLock: " + t.getMessage());
+            }
 
             try {
                 if (clipboardManager != null) {
@@ -889,6 +901,10 @@ public class ClipboardSyncService extends Service implements ClipboardManager.On
         if (multicastLock != null && multicastLock.isHeld()) {
             try { multicastLock.release(); } catch (Exception ignored) {}
             multicastLock = null;
+        }
+        if (wakeLock != null && wakeLock.isHeld()) {
+            try { wakeLock.release(); } catch (Throwable ignored) {}
+            wakeLock = null;
         }
         if (udpSocket != null) {
             try { udpSocket.close(); } catch (Exception ignored) {}

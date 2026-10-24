@@ -49,7 +49,7 @@ public class MainActivity extends Activity implements View.OnClickListener, andr
 
     private BroadcastReceiver statusReceiver;
     private Handler mainHandler;
-    private final Set<String> discoveredKeys = new HashSet<String>();
+    private final java.util.Map<String, Button> discoveredButtons = new java.util.concurrent.ConcurrentHashMap<String, Button>();
     private android.app.AlertDialog activePairDialog;
 
     private static class SwitchChangeListener implements CompoundButton.OnCheckedChangeListener {
@@ -214,7 +214,7 @@ public class MainActivity extends Activity implements View.OnClickListener, andr
                     Toast.makeText(this, "Connecting directly to " + ip + "...", Toast.LENGTH_SHORT).show();
                 }
             } else if (id == R.id.btnScanDevices) {
-                discoveredKeys.clear();
+                discoveredButtons.clear();
                 if (containerDevices != null) containerDevices.removeAllViews();
                 if (tvScanStatus != null) tvScanStatus.setText("Scanning Wi-Fi for laptops and other devices...");
                 ClipboardSyncService service = ClipboardSyncService.getInstance();
@@ -404,17 +404,19 @@ public class MainActivity extends Activity implements View.OnClickListener, andr
                 if (Build.VERSION.SDK_INT >= 17 && act.isDestroyed()) return;
 
                 String key = ip + ":" + port;
-                if (act.discoveredKeys.contains(key)) return;
-                act.discoveredKeys.add(key);
+                String icon = "android".equals(type) ? "📱 " : "💻 ";
+                String btnText = icon + name + " (" + ip + ")\nTap to Connect & Sync";
 
-                if (act.tvScanStatus != null) {
-                    act.tvScanStatus.setText("Found " + act.discoveredKeys.size() + " device(s) on Wi-Fi (Tap to connect):");
+                Button existingBtn = act.discoveredButtons.get(key);
+                if (existingBtn != null) {
+                    existingBtn.setText(btnText);
+                    existingBtn.setOnClickListener(new DeviceConnectClickListener(act, name, ip, port));
+                    return;
                 }
 
                 if (act.containerDevices != null) {
                     Button btn = new Button(act);
-                    String icon = "android".equals(type) ? "📱 " : "💻 ";
-                    btn.setText(icon + name + " (" + ip + ")\nTap to Connect & Sync");
+                    btn.setText(btnText);
                     btn.setTextColor(0xFFFFFFFF);
                     btn.setTextSize(13);
                     btn.setBackgroundResource(R.drawable.btn_outline);
@@ -427,6 +429,11 @@ public class MainActivity extends Activity implements View.OnClickListener, andr
 
                     btn.setOnClickListener(new DeviceConnectClickListener(act, name, ip, port));
                     act.containerDevices.addView(btn);
+                    act.discoveredButtons.put(key, btn);
+
+                    if (act.tvScanStatus != null) {
+                        act.tvScanStatus.setText("Found " + act.discoveredButtons.size() + " device(s) on Wi-Fi (Tap to connect):");
+                    }
                 }
             } catch (Throwable t) {
                 Log.w("MainActivity", "Error in AddDeviceViewRunnable: " + t.getMessage());
@@ -531,6 +538,7 @@ public class MainActivity extends Activity implements View.OnClickListener, andr
         ClipboardSyncService service = ClipboardSyncService.getInstance();
         if (service != null) {
             service.connectSync();
+            service.sendDiscoveryBroadcast();
         }
     }
 

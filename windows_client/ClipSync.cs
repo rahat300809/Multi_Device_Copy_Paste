@@ -38,6 +38,11 @@ namespace ClipSync
                 return icon + Name + " (" + IP + ":" + Port + ")";
             }
         }
+
+        public override string ToString()
+        {
+            return DisplayText;
+        }
     }
 
     // =========================================================================
@@ -132,139 +137,160 @@ namespace ClipSync
         {
             while (!token.IsCancellationRequested)
             {
+                bool errorOccurred = false;
                 try
                 {
                     TcpClient client = await listener.AcceptTcpClientAsync();
                     string id = Guid.NewGuid().ToString();
                     clients[id] = client;
-                    Task.Run(() => HandleClient(id, client, token));
+                    Task.Run(async () => {
+                        try
+                        {
+                            await HandleClient(id, client, token);
+                        }
+                        catch { }
+                    }, token);
                 }
                 catch
                 {
                     if (token.IsCancellationRequested) break;
+                    errorOccurred = true;
+                }
+                if (errorOccurred)
+                {
+                    try { await Task.Delay(500, token); } catch { }
                 }
             }
         }
 
         private async Task HandleClient(string id, TcpClient client, CancellationToken token)
         {
-            NetworkStream stream = client.GetStream();
-            byte[] buffer = new byte[8192];
-            int read = await stream.ReadAsync(buffer, 0, buffer.Length, token);
-            if (read <= 0) return;
-            string header = Encoding.UTF8.GetString(buffer, 0, read);
-
-            if (header.StartsWith("GET /health"))
+            try
             {
-                byte[] health = Encoding.UTF8.GetBytes("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"status\":\"ok\",\"clients\":" + clients.Count + "}");
-                await stream.WriteAsync(health, 0, health.Length, token);
-                client.Close();
-                TcpClient dummy;
-                clients.TryRemove(id, out dummy);
-                return;
-            }
+                NetworkStream stream = client.GetStream();
+                byte[] buffer = new byte[8192];
+                int read = await stream.ReadAsync(buffer, 0, buffer.Length, token);
+                if (read <= 0) return;
+                string header = Encoding.UTF8.GetString(buffer, 0, read);
 
-            // WebSocket Handshake
-            if (header.Contains("Sec-WebSocket-Key"))
-            {
-                Match match = Regex.Match(header, "Sec-WebSocket-Key:\\s*(.+)");
-                if (match.Success)
+                if (header.StartsWith("GET /health"))
                 {
-                    string key = match.Groups[1].Value.Trim();
-                    string acceptKey = ComputeWebSocketAccept(key);
-                    string response = "HTTP/1.1 101 Switching Protocols\r\n" +
-                                      "Upgrade: websocket\r\n" +
-                                      "Connection: Upgrade\r\n" +
-                                      "Sec-WebSocket-Accept: " + acceptKey + "\r\n\r\n";
-                    byte[] responseBytes = Encoding.UTF8.GetBytes(response);
-                    await stream.WriteAsync(responseBytes, 0, responseBytes.Length, token);
+                    byte[] health = Encoding.UTF8.GetBytes("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"status\":\"ok\",\"clients\":" + clients.Count + "}");
+                    await stream.WriteAsync(health, 0, health.Length, token);
+                    return;
+                }
 
-                    await ProcessWebSocketFrames(id, client, stream, token);
+                // WebSocket Handshake
+                if (header.Contains("Sec-WebSocket-Key"))
+                {
+                    Match match = Regex.Match(header, "Sec-WebSocket-Key:\\s*(.+)");
+                    if (match.Success)
+                    {
+                        string key = match.Groups[1].Value.Trim();
+                        string acceptKey = ComputeWebSocketAccept(key);
+                        string response = "HTTP/1.1 101 Switching Protocols\r\n" +
+                                          "Upgrade: websocket\r\n" +
+                                          "Connection: Upgrade\r\n" +
+                                          "Sec-WebSocket-Accept: " + acceptKey + "\r\n\r\n";
+                        byte[] responseBytes = Encoding.UTF8.GetBytes(response);
+                        await stream.WriteAsync(responseBytes, 0, responseBytes.Length, token);
+
+                        await ProcessWebSocketFrames(id, client, stream, token);
+                    }
                 }
             }
-            client.Close();
-            TcpClient removed;
-            clients.TryRemove(id, out removed);
+            catch { }
+            finally
+            {
+                try { client.Close(); } catch { }
+                TcpClient removed;
+                clients.TryRemove(id, out removed);
+            }
         }
 
         private async Task ProcessWebSocketFrames(string id, TcpClient client, NetworkStream stream, CancellationToken token)
         {
-            byte[] headerBuffer = new byte[2];
-            while (!token.IsCancellationRequested && client.Connected)
+            try
             {
-                int read = await ReadExactAsync(stream, headerBuffer, 2, token);
-                if (read < 2) break;
-
-                bool fin = (headerBuffer[0] & 0x80) != 0;
-                int opcode = headerBuffer[0] & 0x0F;
-                bool masked = (headerBuffer[1] & 0x80) != 0;
-                ulong payloadLen = (ulong)(headerBuffer[1] & 0x7F);
-
-                if (opcode == 0x8) break; // Close
-                if (opcode == 0x9) // Ping
+                byte[] headerBuffer = new byte[2];
+                while (!token.IsCancellationRequested && client.Connected)
                 {
-                    byte[] pong = new byte[] { 0x8A, 0x00 };
-                    await stream.WriteAsync(pong, 0, pong.Length, token);
-                    continue;
-                }
+                    int read = await ReadExactAsync(stream, headerBuffer, 2, token);
+                    if (read < 2) break;
 
-                if (payloadLen == 126)
-                {
-                    byte[] ext = new byte[2];
-                    await ReadExactAsync(stream, ext, 2, token);
-                    payloadLen = (ulong)((ext[0] << 8) | ext[1]);
-                }
-                else if (payloadLen == 127)
-                {
-                    byte[] ext = new byte[8];
-                    await ReadExactAsync(stream, ext, 8, token);
-                    payloadLen = (ulong)((ext[0] << 56) | (ext[1] << 48) | (ext[2] << 40) | (ext[3] << 32) |
-                                         (ext[4] << 24) | (ext[5] << 16) | (ext[6] << 8) | ext[7]);
-                }
+                    bool fin = (headerBuffer[0] & 0x80) != 0;
+                    int opcode = headerBuffer[0] & 0x0F;
+                    bool masked = (headerBuffer[1] & 0x80) != 0;
+                    ulong payloadLen = (ulong)(headerBuffer[1] & 0x7F);
 
-                byte[] mask = new byte[4];
-                if (masked) await ReadExactAsync(stream, mask, 4, token);
-
-                byte[] payload = new byte[payloadLen];
-                await ReadExactAsync(stream, payload, (int)payloadLen, token);
-
-                if (masked)
-                {
-                    for (int i = 0; i < payload.Length; i++)
+                    if (opcode == 0x8) break; // Close
+                    if (opcode == 0x9) // Ping
                     {
-                        payload[i] ^= mask[i % 4];
+                        byte[] pong = new byte[] { 0x8A, 0x00 };
+                        await stream.WriteAsync(pong, 0, pong.Length, token);
+                        continue;
                     }
-                }
 
-                if (opcode == 0x1) // Text frame
-                {
-                    string message = Encoding.UTF8.GetString(payload);
-
-                    // Check for Pair Request
-                    if (message.Contains("\"type\":\"pair_req\""))
+                    if (payloadLen == 126)
                     {
-                        string fromName = ExtractJson(message, "from_name") ?? "Unknown Device";
-                        string fromIp = ((IPEndPoint)client.Client.RemoteEndPoint).Address.ToString();
-                        bool allow = true;
-                        if (OnPairRequestReceived != null)
-                        {
-                            allow = OnPairRequestReceived(fromName, fromIp);
-                        }
-                        string respJson = "{\"type\":\"pair_resp\",\"status\":\"" + (allow ? "accepted" : "rejected") + "\"}";
-                        byte[] frame = CreateWebSocketTextFrame(respJson);
-                        await stream.WriteAsync(frame, 0, frame.Length, token);
-                        if (!allow) break;
+                        byte[] ext = new byte[2];
+                        await ReadExactAsync(stream, ext, 2, token);
+                        payloadLen = (ulong)((ext[0] << 8) | ext[1]);
                     }
-                    else
+                    else if (payloadLen == 127)
                     {
-                        if (OnClipboardMessageReceived != null && (message.Contains("\"type\":\"clipboard\"") || message.Contains("\"type\": \"clipboard\"")))
+                        byte[] ext = new byte[8];
+                        await ReadExactAsync(stream, ext, 8, token);
+                        payloadLen = (ulong)((ext[0] << 56) | (ext[1] << 48) | (ext[2] << 40) | (ext[3] << 32) |
+                                             (ext[4] << 24) | (ext[5] << 16) | (ext[6] << 8) | ext[7]);
+                    }
+
+                    byte[] mask = new byte[4];
+                    if (masked) await ReadExactAsync(stream, mask, 4, token);
+
+                    byte[] payload = new byte[payloadLen];
+                    await ReadExactAsync(stream, payload, (int)payloadLen, token);
+
+                    if (masked)
+                    {
+                        for (int i = 0; i < payload.Length; i++)
                         {
-                            OnClipboardMessageReceived(message);
+                            payload[i] ^= mask[i % 4];
                         }
-                        BroadcastToOthers(id, message);
+                    }
+
+                    if (opcode == 0x1) // Text frame
+                    {
+                        string message = Encoding.UTF8.GetString(payload);
+
+                        // Check for Pair Request
+                        if (message.Contains("\"type\":\"pair_req\""))
+                        {
+                            string fromName = ExtractJson(message, "from_name") ?? "Unknown Device";
+                            string fromIp = "";
+                            try { fromIp = ((IPEndPoint)client.Client.RemoteEndPoint).Address.ToString(); } catch { }
+                            bool allow = true;
+                            if (OnPairRequestReceived != null)
+                            {
+                                allow = OnPairRequestReceived(fromName, fromIp);
+                            }
+                            string respJson = "{\"type\":\"pair_resp\",\"status\":\"" + (allow ? "accepted" : "rejected") + "\"}";
+                            byte[] frame = CreateWebSocketTextFrame(respJson);
+                            await stream.WriteAsync(frame, 0, frame.Length, token);
+                            if (!allow) break;
+                        }
+                        else
+                        {
+                            if (OnClipboardMessageReceived != null && (message.Contains("\"type\":\"clipboard\"") || message.Contains("\"type\": \"clipboard\"")))
+                            {
+                                OnClipboardMessageReceived(message);
+                            }
+                            BroadcastToOthers(id, message);
+                        }
                     }
                 }
             }
+            catch { }
         }
 
         private void BroadcastToOthers(string senderId, string message)
@@ -361,6 +387,12 @@ namespace ClipSync
         public Func<string, string, bool> OnUdpPairRequestReceived;
         public Action<string, string> OnUdpClipboardReceived;
         private ConcurrentDictionary<string, TaskCompletionSource<bool>> pendingPairRequests = new ConcurrentDictionary<string, TaskCompletionSource<bool>>();
+        private string myDeviceName = Environment.MachineName;
+        public string MyDeviceName
+        {
+            get { return myDeviceName; }
+            set { myDeviceName = value; }
+        }
 
         public void SendUdpClipboard(string text, string hash, string myName)
         {
@@ -488,12 +520,14 @@ namespace ClipSync
 
         public void StartBroadcasting(string myName, int myPort)
         {
+            MyDeviceName = myName;
             Task.Run(async () => {
                 while (!cts.IsCancellationRequested)
                 {
                     try
                     {
-                        string msg = "CLIPSYNC_DEV:" + myName + ":windows:" + myPort;
+                        string currentName = MyDeviceName ?? Environment.MachineName;
+                        string msg = "CLIPSYNC_DEV:" + currentName + ":windows:" + myPort;
                         byte[] data = Encoding.UTF8.GetBytes(msg);
 
                         foreach (NetworkInterface ni in NetworkInterface.GetAllNetworkInterfaces())
@@ -538,106 +572,131 @@ namespace ClipSync
 
         public void StartListening(string myName)
         {
+            MyDeviceName = myName;
             Task.Run(async () => {
-                try
+                while (!cts.IsCancellationRequested)
                 {
-                    using (UdpClient udp = new UdpClient())
+                    bool errorOccurred = false;
+                    try
                     {
-                        udp.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
-                        udp.Client.Bind(new IPEndPoint(IPAddress.Any, DISCOVERY_PORT));
-
-                        while (!cts.IsCancellationRequested)
+                        using (UdpClient udp = new UdpClient())
                         {
-                            UdpReceiveResult res = await udp.ReceiveAsync();
-                            string msg = Encoding.UTF8.GetString(res.Buffer);
-                            string remoteIp = res.RemoteEndPoint.Address.ToString();
+                            udp.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+                            udp.Client.Bind(new IPEndPoint(IPAddress.Any, DISCOVERY_PORT));
 
-                            if (msg.StartsWith("CLIPSYNC_DEV:"))
+                            while (!cts.IsCancellationRequested)
                             {
-                                string[] parts = msg.Split(':');
-                                if (parts.Length >= 4)
+                                UdpReceiveResult res = await udp.ReceiveAsync();
+                                string msg = Encoding.UTF8.GetString(res.Buffer);
+                                string remoteIp = res.RemoteEndPoint.Address.ToString();
+
+                                if (msg.StartsWith("CLIPSYNC_DEV:"))
                                 {
-                                    string devName = parts[1];
-                                    string devType = parts[2];
-                                    int port = int.Parse(parts[3]);
-
-                                    // Don't list ourselves
-                                    if (devName == myName) continue;
-
-                                    string key = remoteIp + ":" + port;
-                                    DiscoveredDevice dev;
-                                    if (!devices.TryGetValue(key, out dev))
+                                    string[] parts = msg.Split(':');
+                                    if (parts.Length >= 4)
                                     {
-                                        dev = new DiscoveredDevice { Name = devName, DeviceType = devType, IP = remoteIp, Port = port };
-                                        devices[key] = dev;
-                                    }
-                                    dev.LastSeen = DateTime.Now;
-                                    if (OnDevicesChanged != null) OnDevicesChanged();
-                                }
-                            }
-                            else if (msg.StartsWith("CLIPSYNC_PAIR_REQ:"))
-                            {
-                                string[] parts = msg.Split(':');
-                                if (parts.Length >= 4)
-                                {
-                                    string fromName = parts[1];
-                                    string fromIp = parts[2];
-                                    int fromPort = int.Parse(parts[3]);
+                                        string devName = parts[1];
+                                        string devType = parts[2];
+                                        int port = int.Parse(parts[3]);
 
-                                    Task.Run(async () => {
-                                        bool allow = true;
-                                        if (OnUdpPairRequestReceived != null)
-                                        {
-                                            allow = OnUdpPairRequestReceived(fromName, fromIp);
-                                        }
-                                        string respMsg = "CLIPSYNC_PAIR_RESP:" + (allow ? "allow" : "deny") + ":" + myName;
-                                        byte[] respBytes = Encoding.UTF8.GetBytes(respMsg);
-                                        using (UdpClient respUdp = new UdpClient())
-                                        {
-                                            await respUdp.SendAsync(respBytes, respBytes.Length, new IPEndPoint(IPAddress.Parse(remoteIp), DISCOVERY_PORT));
-                                        }
-                                    });
-                                }
-                            }
-                            else if (msg.StartsWith("CLIPSYNC_PAIR_RESP:"))
-                            {
-                                string[] parts = msg.Split(':');
-                                if (parts.Length >= 3)
-                                {
-                                    string status = parts[1];
-                                    string fromName = parts[2];
-                                    bool isAllowed = status.Equals("allow", StringComparison.OrdinalIgnoreCase) || status.Equals("accepted", StringComparison.OrdinalIgnoreCase);
+                                        string currentName = MyDeviceName ?? Environment.MachineName;
+                                        // Don't list ourselves
+                                        if (devName == currentName) continue;
 
-                                    TaskCompletionSource<bool> tcs;
-                                    if (pendingPairRequests.TryGetValue(remoteIp, out tcs))
-                                    {
-                                        tcs.TrySetResult(isAllowed);
+                                        string key = remoteIp + ":" + port;
+                                        DiscoveredDevice dev;
+                                        if (!devices.TryGetValue(key, out dev))
+                                        {
+                                            dev = new DiscoveredDevice { Name = devName, DeviceType = devType, IP = remoteIp, Port = port };
+                                            devices[key] = dev;
+                                        }
+                                        else
+                                        {
+                                            dev.Name = devName;
+                                            dev.DeviceType = devType;
+                                        }
+                                        dev.LastSeen = DateTime.Now;
+                                        if (OnDevicesChanged != null) OnDevicesChanged();
                                     }
                                 }
-                            }
-                            else if (msg.StartsWith("CLIPSYNC_CLIP:"))
-                            {
-                                string[] parts = msg.Split(':');
-                                if (parts.Length >= 4)
+                                else if (msg.StartsWith("CLIPSYNC_PAIR_REQ:"))
                                 {
-                                    string b64 = parts[1];
-                                    string hash = parts[2];
-                                    string senderName = parts[3];
-                                    if (senderName != myName && OnUdpClipboardReceived != null)
+                                    string[] parts = msg.Split(':');
+                                    if (parts.Length >= 4)
                                     {
-                                        try
+                                        string fromName = parts[1];
+                                        string fromIp = parts[2];
+                                        int fromPort = int.Parse(parts[3]);
+
+                                        Task.Run(async () => {
+                                            try
+                                            {
+                                                bool allow = true;
+                                                if (OnUdpPairRequestReceived != null)
+                                                {
+                                                    allow = OnUdpPairRequestReceived(fromName, fromIp);
+                                                }
+                                                string currentName = MyDeviceName ?? Environment.MachineName;
+                                                string respMsg = "CLIPSYNC_PAIR_RESP:" + (allow ? "allow" : "deny") + ":" + currentName;
+                                                byte[] respBytes = Encoding.UTF8.GetBytes(respMsg);
+                                                using (UdpClient respUdp = new UdpClient())
+                                                {
+                                                    await respUdp.SendAsync(respBytes, respBytes.Length, new IPEndPoint(IPAddress.Parse(remoteIp), DISCOVERY_PORT));
+                                                }
+                                            }
+                                            catch { }
+                                        });
+                                    }
+                                }
+                                else if (msg.StartsWith("CLIPSYNC_PAIR_RESP:"))
+                                {
+                                    string[] parts = msg.Split(':');
+                                    if (parts.Length >= 3)
+                                    {
+                                        string status = parts[1];
+                                        string fromName = parts[2];
+                                        bool isAllowed = status.Equals("allow", StringComparison.OrdinalIgnoreCase) || status.Equals("accepted", StringComparison.OrdinalIgnoreCase);
+
+                                        TaskCompletionSource<bool> tcs;
+                                        if (pendingPairRequests.TryGetValue(remoteIp, out tcs))
                                         {
-                                            string text = Encoding.UTF8.GetString(Convert.FromBase64String(b64));
-                                            OnUdpClipboardReceived(text, hash);
+                                            tcs.TrySetResult(isAllowed);
                                         }
-                                        catch { }
+                                    }
+                                }
+                                else if (msg.StartsWith("CLIPSYNC_CLIP:"))
+                                {
+                                    string[] parts = msg.Split(':');
+                                    if (parts.Length >= 4)
+                                    {
+                                        string b64 = parts[1];
+                                        string hash = parts[2];
+                                        string senderName = parts[3];
+                                        string currentName = MyDeviceName ?? Environment.MachineName;
+                                        if (senderName != currentName && OnUdpClipboardReceived != null)
+                                        {
+                                            try
+                                            {
+                                                string text = Encoding.UTF8.GetString(Convert.FromBase64String(b64));
+                                                OnUdpClipboardReceived(text, hash);
+                                            }
+                                            catch { }
+                                        }
                                     }
                                 }
                             }
                         }
                     }
+                    catch
+                    {
+                        if (cts.IsCancellationRequested) break;
+                        errorOccurred = true;
+                    }
+                    if (errorOccurred)
+                    {
+                        try { await Task.Delay(1000); } catch { }
+                    }
                 }
-                catch { }
             });
         }
 
@@ -698,28 +757,74 @@ namespace ClipSync
 
             lblMyIp = new Label
             {
-                Text = "My Device: " + Environment.MachineName + " | IP: " + context.GetLocalIpAddress() + " (Port 8765)",
+                Text = "My Device: " + context.DeviceName + " | IP: " + context.GetLocalIpAddress() + " (Port 8765)",
                 Font = new Font("Segoe UI", 9.5f),
                 ForeColor = Color.FromArgb(148, 163, 184),
-                Location = new Point(20, 48),
+                Location = new Point(20, 44),
                 AutoSize = true
             };
             this.Controls.Add(lblMyIp);
+
+            Label lblDevName = new Label
+            {
+                Text = "My Device Name:",
+                Font = new Font("Segoe UI", 9.5f, FontStyle.Bold),
+                ForeColor = Color.FromArgb(226, 232, 240),
+                Location = new Point(20, 72),
+                AutoSize = true
+            };
+            this.Controls.Add(lblDevName);
+
+            TextBox txtDevName = new TextBox
+            {
+                Text = context.DeviceName,
+                Location = new Point(150, 70),
+                Size = new Size(200, 26),
+                Font = new Font("Segoe UI", 10f),
+                ForeColor = Color.White,
+                BackColor = Color.FromArgb(30, 41, 59),
+                BorderStyle = BorderStyle.FixedSingle
+            };
+            this.Controls.Add(txtDevName);
+
+            Button btnSaveDevName = new Button
+            {
+                Text = "💾 Save Name",
+                Location = new Point(360, 68),
+                Size = new Size(100, 28),
+                BackColor = Color.FromArgb(37, 99, 235),
+                ForeColor = Color.White,
+                FlatStyle = FlatStyle.Flat,
+                Font = new Font("Segoe UI", 9f, FontStyle.Bold)
+            };
+            btnSaveDevName.Click += (s, e) => {
+                string newName = txtDevName.Text.Trim();
+                if (string.IsNullOrEmpty(newName))
+                {
+                    MessageBox.Show("Device name cannot be empty.", "ClipSync", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+                context.DeviceName = newName;
+                lblMyIp.Text = "My Device: " + context.DeviceName + " | IP: " + context.GetLocalIpAddress() + " (Port 8765)";
+                lblStatus.Text = "✅ Device name saved: " + context.DeviceName;
+                MessageBox.Show("✅ Device name successfully updated to:\n\"" + context.DeviceName + "\"\n\nNow broadcasting this name to nearby devices.", "ClipSync Device Name", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            };
+            this.Controls.Add(btnSaveDevName);
 
             Label lblListTitle = new Label
             {
                 Text = "DISCOVERED DEVICES ON LOCAL NETWORK (WIFI / LAN)",
                 Font = new Font("Segoe UI", 8.5f, FontStyle.Bold),
                 ForeColor = Color.FromArgb(96, 165, 250),
-                Location = new Point(20, 85),
+                Location = new Point(20, 106),
                 AutoSize = true
             };
             this.Controls.Add(lblListTitle);
 
             listDevices = new ListBox
             {
-                Location = new Point(20, 110),
-                Size = new Size(440, 220),
+                Location = new Point(20, 130),
+                Size = new Size(440, 200),
                 BackColor = Color.FromArgb(30, 41, 59),
                 ForeColor = Color.White,
                 BorderStyle = BorderStyle.FixedSingle,
@@ -743,8 +848,8 @@ namespace ClipSync
             btnConnect = new Button
             {
                 Text = "🔗 Send Connection Request",
-                Location = new Point(20, 380),
-                Size = new Size(240, 42),
+                Location = new Point(20, 375),
+                Size = new Size(240, 40),
                 BackColor = Color.FromArgb(37, 99, 235),
                 ForeColor = Color.White,
                 FlatStyle = FlatStyle.Flat,
@@ -757,8 +862,8 @@ namespace ClipSync
             btnRefresh = new Button
             {
                 Text = "🔄 Refresh",
-                Location = new Point(280, 380),
-                Size = new Size(180, 42),
+                Location = new Point(280, 375),
+                Size = new Size(180, 40),
                 BackColor = Color.FromArgb(51, 65, 85),
                 ForeColor = Color.White,
                 FlatStyle = FlatStyle.Flat
@@ -771,15 +876,15 @@ namespace ClipSync
                 Text = "Or Enter IP Directly (Wi-Fi / Tailscale):",
                 Font = new Font("Segoe UI", 8.5f, FontStyle.Bold),
                 ForeColor = Color.FromArgb(96, 165, 250),
-                Location = new Point(20, 435),
+                Location = new Point(20, 425),
                 AutoSize = true
             };
             this.Controls.Add(lblManual);
 
             TextBox txtManualIp = new TextBox
             {
-                Location = new Point(20, 460),
-                Size = new Size(240, 32),
+                Location = new Point(20, 450),
+                Size = new Size(240, 30),
                 Font = new Font("Segoe UI", 10.5f),
                 ForeColor = Color.White,
                 BackColor = Color.FromArgb(30, 41, 59),
@@ -790,7 +895,7 @@ namespace ClipSync
             Button btnManualConnect = new Button
             {
                 Text = "Direct Connect",
-                Location = new Point(280, 458),
+                Location = new Point(280, 448),
                 Size = new Size(180, 32),
                 BackColor = Color.FromArgb(37, 99, 235),
                 ForeColor = Color.White,
@@ -829,7 +934,7 @@ namespace ClipSync
             };
             this.Controls.Add(btnManualConnect);
 
-            this.Size = new Size(500, 545);
+            this.Size = new Size(500, 540);
         }
 
         private void RefreshDeviceList()
@@ -905,6 +1010,23 @@ namespace ClipSync
         private bool isPaused = false;
         private string lastHash = "";
         private string configPath;
+
+        public string DeviceName
+        {
+            get { return deviceName; }
+            set
+            {
+                if (!string.IsNullOrWhiteSpace(value) && deviceName != value)
+                {
+                    deviceName = value.Trim();
+                    SaveConfig();
+                    if (discoveryService != null)
+                    {
+                        discoveryService.MyDeviceName = deviceName;
+                    }
+                }
+            }
+        }
 
         public ClipSyncContext()
         {
@@ -1477,6 +1599,22 @@ namespace ClipSync
         [STAThread]
         static void Main()
         {
+            try
+            {
+                Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+                Application.ThreadException += (s, e) => {
+                    try { File.AppendAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "clipsync_error.log"), DateTime.Now + " [ThreadException]: " + e.Exception + Environment.NewLine); } catch { }
+                };
+                AppDomain.CurrentDomain.UnhandledException += (s, e) => {
+                    try { File.AppendAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "clipsync_error.log"), DateTime.Now + " [UnhandledException]: " + e.ExceptionObject + Environment.NewLine); } catch { }
+                };
+                TaskScheduler.UnobservedTaskException += (s, e) => {
+                    try { File.AppendAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "clipsync_error.log"), DateTime.Now + " [UnobservedTaskException]: " + e.Exception + Environment.NewLine); } catch { }
+                    e.SetObserved();
+                };
+            }
+            catch { }
+
             bool createdNew;
             using (Mutex mutex = new Mutex(true, "ClipSyncSingleInstanceMutex_rahat300809", out createdNew))
             {
